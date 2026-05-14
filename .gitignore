@@ -1,0 +1,95 @@
+# 🔐 ENV FILES (SECRETS)
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# 🧠 PYTHON CACHE & VENV
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 🔑 FIREBASE / CREDENTIALS (VERY IMPORTANT - NEVER COMMIT)
+serviceAccount.json
+credentials.json
+vennela-firebase-adminsdk-*.json
+vennela-firebase-key.json
+vennela-firebase-service-account.json
+*.key
+*.pem
+*.p12
+*.jks
+
+# 🧾 MEMORY / LOCAL DATA (NEVER PUSH PERSONAL DATA)
+memory.json
+memory_db.json
+*.db
+.hf_cache/
+.cache/
+
+# 📊 LOG FILES & DEBUGGING
+logs/
+*.log
+*.log.gz
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 🖥️ SYSTEM FILES
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 📦 DEPENDENCY LOCKS (use for reproducible builds)
+poetry.lock
+Pipfile.lock
+
+# 🚀 RENDER & DEPLOYMENT
+.render.yaml
+.env.production
+*.pid
+
+# 📝 IDE & EDITOR FILES
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/*
+*.sublime-project
+*.sublime-workspace
+.vs/
+.vscoderc

@@ -1,0 +1,462 @@
+"""Vennela AI - Self-learning AI assistant with semantic memory and emotion detection."""
+import logging
+import os
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+from dotenv import load_dotenv
+from firebase_admin import firestore
+
+from firebase_db import get_db, initialize_firebase
+from ai_router import get_ai_response
+from smart_memory import get_memory, save_memory, update_memory
+from retrieval import retrieve_memory
+
+# =========================
+# CONFIGURATION
+# =========================
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Vennela AI",
+    description="Self-learning AI assistant with semantic memory",
+    version="2.0.0"
+)
+
+# Prompt
+VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", """You are Vennela, a helpful AI assistant with semantic memory. 
+You remember important details about users and provide personalized, contextual responses. 
+Be friendly, thoughtful, and always try to understand the user's underlying needs.""")
+
+RECENT_CHAT_LIMIT = int(os.getenv("RECENT_CHAT_LIMIT", "20"))
+MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "5000"))
+
+# Rate limiting
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+RATE_LIMIT_WINDOW_MINUTES = int(os.getenv("RATE_LIMIT_WINDOW_MINUTES", "1"))
+
+# In-memory rate limiting tracker
+_rate_limit_tracker: Dict[str, list] = {}
+
+
+# =========================
+# REQUEST MODELS
+# =========================
+class ChatRequest(BaseModel):
+    """Chat request with validation."""
+    user_id: str = Field(..., min_length=1, max_length=256, description="User ID")
+    message: str = Field(..., min_length=1, max_length=5000, description="User message")
+    
+    @validator('user_id')
+    def validate_user_id(cls, v):
+        """Validate user_id format."""
+        if not v or not isinstance(v, str):
+            raise ValueError('user_id must be a non-empty string')
+        if not v.replace('_', '').replace('-', '').isalnum():
+            raise ValueError('user_id must contain only alphanumeric characters, underscores, and hyphens')
+        return v.strip()
+    
+    @validator('message')
+    def validate_message(cls, v):
+        """Validate message content."""
+        if not v or not isinstance(v, str):
+            raise ValueError('message must be a non-empty string')
+        v = v.strip()
+        if len(v) == 0:
+            raise ValueError('message cannot be empty after trimming whitespace')
+        return v
+
+
+class ChatResponse(BaseModel):
+    """Chat response with metadata."""
+    reply: str
+    provider: str
+    relevant_memory: Optional[str] = None
+    memory_summary: Optional[str] = None
+    latency_ms: Optional[int] = None
+
+
+# =========================
+# INITIALIZATION
+# =========================
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup."""
+    logger.info("Starting Vennela AI...")
+    
+    # Initialize Firebase
+    if not initialize_firebase():
+        logger.error("Failed to initialize Firebase. Some features may not work.")
+    
+    # Verify environment
+    if not os.getenv("GROQ_API_KEY") and not os.getenv("OPENROUTER_API_KEY"):
+        logger.warning("No AI provider keys found. Chat will not work.")
+    
+    logger.info("Vennela AI startup complete")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on shutdown."""
+    logger.info("Shutting down Vennela AI")
+
+
+# =========================
+# MIDDLEWARE
+# =========================
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests."""
+    logger.debug(f"{request.method} {request.url.path}")
+    response = await call_next(request)
+    logger.debug(f"Response: {response.status_code}")
+    return response
+
+
+# =========================
+# RATE LIMITING
+# =========================
+def check_rate_limit(user_id: str) -> bool:
+    """
+    Check if user has exceeded rate limit.
+    
+    Args:
+        user_id: User identifier
+        
+    Returns:
+        bool: True if within limit, False if exceeded
+    """
+    now = datetime.now()
+    window_start = now - timedelta(minutes=RATE_LIMIT_WINDOW_MINUTES)
+    
+    if user_id not in _rate_limit_tracker:
+        _rate_limit_tracker[user_id] = []
+    
+    # Remove old requests outside window
+    _rate_limit_tracker[user_id] = [
+        req_time for req_time in _rate_limit_tracker[user_id]
+        if req_time > window_start
+    ]
+    
+    # Check limit
+    if len(_rate_limit_tracker[user_id]) >= RATE_LIMIT_REQUESTS:
+        logger.warning(f"Rate limit exceeded for user {user_id}")
+        return False
+    
+    # Add current request
+    _rate_limit_tracker[user_id].append(now)
+    return True
+
+
+# =========================
+# CHAT FUNCTIONS
+# =========================
+def save_message(user_id: str, role: str, content: str) -> bool:
+    """
+    Save message to Firestore.
+    
+    Args:
+        user_id: User identifier
+        role: Message role (user/assistant)
+        content: Message content
+        
+    Returns:
+        bool: True if successful
+    """
+    try:
+        db = get_db()
+        if not db:
+            logger.error("Database not available")
+            return False
+        
+        db.collection("chat_memory") \
+            .document(user_id) \
+            .collection("messages") \
+            .add({
+                "role": role,
+                "content": content[:5000],  # Truncate
+                "timestamp": firestore.SERVER_TIMESTAMP
+            })
+        return True
+    except Exception as e:
+        logger.error(f"Error saving message: {e}")
+        return False
+
+
+def format_smart_memory(
+    memory: Dict,
+    relevant_memory: Optional[str] = None
+) -> str:
+    """
+    Format memory for AI context.
+    
+    Args:
+        memory: Memory dictionary
+        relevant_memory: Retrieved relevant memory
+        
+    Returns:
+        str: Formatted memory for prompt
+    """
+    summary = memory.get("summary", "") or "No long-term memory yet."
+    emotions = memory.get("emotions", {}) or {}
+    sentiments = memory.get("sentiments", {}) or {}
+    
+    emotion_summary = ", ".join(f"{key}={value}" for key, value in emotions.items()) \
+        if emotions else "No emotional trend yet."
+    sentiment_summary = ", ".join(f"{key}={value}" for key, value in sentiments.items()) \
+        if sentiments else "No sentiment trend yet."
+    
+    relevant_memory_str = relevant_memory or "No directly relevant memory found."
+    
+    return f"""
+{VENNELA_PROMPT}
+
+USER PROFILE:
+{summary}
+
+EMOTIONAL TRENDS:
+{emotion_summary}
+
+SENTIMENT TRENDS:
+{sentiment_summary}
+
+RELEVANT MEMORY FOR THIS MESSAGE:
+{relevant_memory_str}
+"""
+
+
+def load_messages(user_id: str, smart_memory: Dict, relevant_memory: Optional[str] = None) -> list:
+    """
+    Load recent chat history with smart memory context.
+    
+    Args:
+        user_id: User identifier
+        smart_memory: Memory dictionary
+        relevant_memory: Retrieved relevant memory
+        
+    Returns:
+        List of message dicts for AI
+    """
+    try:
+        db = get_db()
+        if not db:
+            logger.warning("Database not available - creating minimal context")
+            # Return minimal context without chat history (for development)
+            messages = [
+                {
+                    "role": "system",
+                    "content": format_smart_memory(smart_memory, relevant_memory)
+                }
+            ]
+            return messages
+        
+        docs = db.collection("chat_memory") \
+            .document(user_id) \
+            .collection("messages") \
+            .order_by("timestamp") \
+            .stream()
+        
+        messages = [
+            {
+                "role": "system",
+                "content": format_smart_memory(smart_memory, relevant_memory)
+            }
+        ]
+        
+        chat_history = list(docs)[-RECENT_CHAT_LIMIT:]
+        
+        for doc in chat_history:
+            data = doc.to_dict()
+            if data and "role" in data and "content" in data:
+                messages.append({
+                    "role": data["role"],
+                    "content": data["content"]
+                })
+        
+        return messages
+        
+    except Exception as e:
+        logger.error(f"Error loading messages: {e}")
+        # Still return system message with memory context
+        messages = [
+            {
+                "role": "system",
+                "content": format_smart_memory(smart_memory, relevant_memory)
+            }
+        ]
+        return messages
+
+
+# =========================
+# API ENDPOINTS
+# =========================
+@app.get("/")
+async def root():
+    """Root endpoint for quick deployment checks."""
+    return {"message": "Vennela AI Running 🚀"}
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    db = get_db()
+    firebase_ok = db is not None
+    
+    return {
+        "status": "ok",
+        "firebase": "connected" if firebase_ok else "disconnected",
+        "version": "2.0.0"
+    }
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest) -> ChatResponse:
+    """
+    Process chat message with memory and AI response.
+    
+    Args:
+        request: Chat request with user_id and message
+        
+    Returns:
+        ChatResponse with reply and metadata
+    """
+    import time
+    start_time = time.time()
+    
+    user_id = request.user_id
+    user_message = request.message
+    
+    logger.info(f"Chat request from {user_id}: {len(user_message)} chars")
+    
+    try:
+        # Check rate limit
+        if not check_rate_limit(user_id):
+            logger.warning(f"Rate limit exceeded for {user_id}")
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded. Max {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW_MINUTES} minute(s)"
+            )
+        
+        # Load memory
+        memory = get_memory(user_id)
+        
+        # Retrieve relevant memory
+        relevant_memory = retrieve_memory(memory, user_message)
+        
+        # Save user message
+        save_message(user_id, "user", user_message)
+        
+        # Load recent chat with context
+        messages = load_messages(user_id, memory, relevant_memory)
+        
+        if not messages or len(messages) < 1:
+            logger.error(f"Failed to load chat messages for {user_id}")
+            raise HTTPException(status_code=500, detail="Failed to load chat context")
+        
+        logger.info(f"Chat context loaded with {len(messages)} messages")
+        
+        # Get AI response
+        ai_result = get_ai_response(messages)
+        ai_reply = ai_result.get("response", "")
+        provider = ai_result.get("provider", "unknown")
+        latency_ms = ai_result.get("latency_ms")
+        
+        if not ai_reply:
+            logger.error("Empty response from AI provider")
+            raise HTTPException(status_code=500, detail="No response from AI provider")
+        
+        # Save AI response
+        save_message(user_id, "assistant", ai_reply)
+        
+        # Update memory
+        updated_memory = update_memory(user_id, user_message, ai_reply, memory)
+        save_memory(user_id, updated_memory)
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        logger.info(f"Chat response sent ({provider}, {elapsed_ms}ms)")
+        
+        return ChatResponse(
+            reply=ai_reply,
+            provider=provider,
+            relevant_memory=relevant_memory,
+            memory_summary=updated_memory.get("summary"),
+            latency_ms=elapsed_ms
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in chat endpoint: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/memory/{user_id}")
+async def get_user_memory(user_id: str):
+    """
+    Retrieve user memory (profile, summary, emotional trends).
+    
+    Args:
+        user_id: User identifier
+        
+    Returns:
+        Memory summary
+    """
+    try:
+        if not user_id or len(user_id) > 256:
+            raise HTTPException(status_code=400, detail="Invalid user_id")
+        
+        memory = get_memory(user_id)
+        
+        return {
+            "profile": memory.get("profile"),
+            "summary": memory.get("summary"),
+            "emotions": memory.get("emotions"),
+            "sentiments": memory.get("sentiments"),
+            "long_term_count": len(memory.get("long_term", [])),
+            "embeddings_count": len(memory.get("embeddings", []))
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving memory: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve memory")
+
+
+# =========================
+# ERROR HANDLERS
+# =========================
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "detail": str(exc)
+        }
+    )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    port = int(os.getenv("PORT", "8000"))
+    logger.info(f"Starting server on port {port}")
+    
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
+    )
