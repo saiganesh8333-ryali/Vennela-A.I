@@ -11,6 +11,7 @@ from firebase_admin import credentials, firestore
 logger = logging.getLogger(__name__)
 
 db: Optional[firestore.Client] = None
+_firebase_init_attempted = False
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -117,7 +118,7 @@ def _load_credentials():
 
 def initialize_firebase() -> bool:
     """Initialize Firebase connection once."""
-    global db
+    global db, _firebase_init_attempted
 
     if not _firebase_enabled():
         logger.warning("Firebase is disabled by FIREBASE_ENABLED=false")
@@ -125,17 +126,21 @@ def initialize_firebase() -> bool:
         return False
 
     try:
+        if _firebase_init_attempted and db is None:
+            return False
+
         if firebase_admin._apps:
             db = firestore.client()
             logger.info("Using existing Firebase app instance")
             return True
 
+        _firebase_init_attempted = True
         firebase_admin.initialize_app(_load_credentials())
         db = firestore.client()
         logger.info("Firebase initialized successfully")
         return True
     except Exception as exc:
-        logger.error("Failed to initialize Firebase: %s", exc)
+        logger.warning("Firebase unavailable, continuing without database: %s", exc)
         db = None
         return False
 

@@ -14,6 +14,7 @@ from firebase_db import get_db, initialize_firebase
 from ai_router import get_ai_response
 from smart_memory import get_memory, save_memory, update_memory
 from retrieval import retrieve_memory
+from nlp_engine import detect_intent, get_rule_based_reply
 
 # =========================
 # CONFIGURATION
@@ -85,6 +86,7 @@ class ChatResponse(BaseModel):
     """Chat response with metadata."""
     reply: str
     provider: str
+    intent: Optional[str] = None
     relevant_memory: Optional[str] = None
     memory_summary: Optional[str] = None
     latency_ms: Optional[int] = None
@@ -450,9 +452,34 @@ async def chat(request: ChatRequest) -> ChatResponse:
         except Exception as e:
             logger.error(f"Relevant memory retrieval failed for {user_id}: {e}", exc_info=True)
             relevant_memory = None
+
+        intent = detect_intent(user_message)
         
         # Save user message
         save_message(user_id, "user", user_message)
+
+        local_reply = get_rule_based_reply(intent, user_message, memory, relevant_memory)
+        if local_reply:
+            save_message(user_id, "assistant", local_reply)
+
+            try:
+                updated_memory = update_memory(user_id, user_message, local_reply, memory)
+                save_memory(user_id, updated_memory)
+            except Exception as e:
+                logger.error(f"Memory update failed for {user_id}: {e}", exc_info=True)
+                updated_memory = memory
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(f"Local response sent ({intent}, {elapsed_ms}ms)")
+
+            return ChatResponse(
+                reply=local_reply,
+                provider="local_rules",
+                intent=intent,
+                relevant_memory=relevant_memory,
+                memory_summary=updated_memory.get("summary"),
+                latency_ms=elapsed_ms
+            )
         
         # Load recent chat with context
         messages = load_messages(user_id, memory, relevant_memory)
@@ -499,6 +526,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         return ChatResponse(
             reply=ai_reply,
             provider=provider,
+            intent=intent,
             relevant_memory=relevant_memory,
             memory_summary=updated_memory.get("summary"),
             latency_ms=elapsed_ms,
@@ -513,6 +541,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         return ChatResponse(
             reply=AI_UNAVAILABLE_REPLY,
             provider="error",
+            intent="error",
             latency_ms=elapsed_ms,
             error=str(e)
         )
