@@ -71,9 +71,10 @@ def _groq_models() -> list:
 # =========================
 def get_ai_response(messages: list) -> Dict[str, str]:
     """
-    Get AI response with provider fallback and error handling.
+    Get AI response with provider failover and error handling.
     
     Tries Groq first, falls back to OpenRouter, then returns error message.
+    Production-level JARVIS-style redundancy system.
     
     Args:
         messages: List of message dicts with "role" and "content"
@@ -82,24 +83,28 @@ def get_ai_response(messages: list) -> Dict[str, str]:
         Dict with "provider" and "response" keys
     """
     if not messages:
-        logger.error("No messages provided to get_ai_response")
+        logger.error("❌ No messages provided to get_ai_response")
         return {
             "provider": "error",
             "response": "No messages provided"
         }
     
     # Try Groq first
+    logger.info("🚀 Attempting to use Groq provider...")
     response = _try_groq(messages)
     if response:
+        logger.info("✅ Successfully using Groq")
         return response
     
     # Fallback to OpenRouter
+    logger.warning("⚠️ Groq failed, switching to OpenRouter fallback...")
     response = _try_openrouter(messages)
     if response:
+        logger.info("✅ Successfully switched to OpenRouter")
         return response
     
     # Final fail-safe
-    logger.error("Both Groq and OpenRouter failed")
+    logger.critical("❌ CRITICAL: Both Groq and OpenRouter failed - no AI providers available")
     return {
         "provider": "none",
         "response": "Both AI providers unavailable. Please try again later."
@@ -119,12 +124,12 @@ def _try_groq(messages: list) -> Optional[Dict[str, str]]:
     try:
         client = _get_groq_client()
         if not client:
-            logger.debug("Groq client not initialized")
+            logger.debug("⚠️ Groq client not initialized - API key missing or invalid")
             return None
         
         for model in _groq_models():
             try:
-                logger.debug(f"Sending request to Groq model {model}...")
+                logger.debug(f"📤 Sending request to Groq model {model}...")
                 start_time = time.time()
 
                 response = client.chat.completions.create(
@@ -135,7 +140,7 @@ def _try_groq(messages: list) -> Optional[Dict[str, str]]:
                 )
 
                 elapsed = time.time() - start_time
-                logger.info(f"Groq response received from {model} in {elapsed:.2f}s")
+                logger.info(f"✅ Groq response received from {model} in {elapsed:.2f}s")
 
                 return {
                     "provider": "Groq",
@@ -144,28 +149,28 @@ def _try_groq(messages: list) -> Optional[Dict[str, str]]:
                     "latency_ms": int(elapsed * 1000)
                 }
             except APIError as e:
-                logger.warning(f"Groq API error for model {model}: {e}")
+                logger.warning(f"❌ Groq API error for model {model}: {e}")
                 continue
 
         return None
         
     except RateLimitError as e:
-        logger.warning(f"Groq rate limit hit: {e}")
+        logger.warning(f"⏱️ Groq rate limit hit: {e}")
         return None
     except APIConnectionError as e:
-        logger.warning(f"Groq connection error: {e}")
+        logger.warning(f"🔌 Groq connection error: {e}")
         return None
     except APIError as e:
-        logger.warning(f"Groq API error: {e}")
+        logger.warning(f"❌ Groq API error: {e}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error from Groq: {e}")
+        logger.error(f"❌ Unexpected error from Groq: {e}")
         return None
 
 
 def _try_openrouter(messages: list) -> Optional[Dict[str, str]]:
     """
-    Try to get response from OpenRouter (fallback).
+    Try to get response from OpenRouter (fallback provider).
     
     Args:
         messages: List of message dicts
@@ -176,10 +181,10 @@ def _try_openrouter(messages: list) -> Optional[Dict[str, str]]:
     try:
         client = _get_openrouter_client()
         if not client:
-            logger.debug("OpenRouter client not initialized")
+            logger.debug("⚠️ OpenRouter client not initialized - API key missing or invalid")
             return None
         
-        logger.debug("Sending request to OpenRouter (fallback)...")
+        logger.debug("📤 Sending request to OpenRouter (fallback)...")
         start_time = time.time()
         
         response = client.chat.completions.create(
@@ -190,7 +195,7 @@ def _try_openrouter(messages: list) -> Optional[Dict[str, str]]:
         )
         
         elapsed = time.time() - start_time
-        logger.info(f"OpenRouter response received in {elapsed:.2f}s")
+        logger.info(f"✅ OpenRouter response received in {elapsed:.2f}s (FALLBACK SUCCESS)")
         
         return {
             "provider": "OpenRouter",
@@ -200,14 +205,14 @@ def _try_openrouter(messages: list) -> Optional[Dict[str, str]]:
         }
         
     except RateLimitError as e:
-        logger.warning(f"OpenRouter rate limit hit: {e}")
+        logger.warning(f"⏱️ OpenRouter rate limit hit: {e}")
         return None
     except APIConnectionError as e:
-        logger.warning(f"OpenRouter connection error: {e}")
+        logger.warning(f"🔌 OpenRouter connection error: {e}")
         return None
     except APIError as e:
-        logger.warning(f"OpenRouter API error: {e}")
+        logger.warning(f"❌ OpenRouter API error: {e}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error from OpenRouter: {e}")
+        logger.error(f"❌ Unexpected error from OpenRouter: {e}")
         return None

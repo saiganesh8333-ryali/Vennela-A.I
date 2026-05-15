@@ -338,6 +338,69 @@ async def health_check():
     }
 
 
+@app.get("/ai-health")
+async def ai_health_check():
+    """
+    Test both AI providers (Groq and OpenRouter) health status.
+    
+    Returns:
+        Dict with provider health status
+    """
+    from openai import OpenAI
+    
+    result = {}
+    
+    # Test GROQ
+    try:
+        groq_key = os.getenv("GROQ_API_KEY")
+        if not groq_key:
+            result["groq"] = "not_configured"
+        else:
+            groq_client = OpenAI(
+                api_key=groq_key,
+                base_url="https://api.groq.com/openai/v1",
+                timeout=10
+            )
+            
+            response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=5
+            )
+            
+            result["groq"] = "healthy"
+            logger.info("✅ Groq provider is healthy")
+    except Exception as e:
+        result["groq"] = f"failed: {str(e)}"
+        logger.warning(f"⚠️ Groq health check failed: {e}")
+    
+    # Test OPENROUTER
+    try:
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        if not openrouter_key:
+            result["openrouter"] = "not_configured"
+        else:
+            openrouter_client = OpenAI(
+                api_key=openrouter_key,
+                base_url="https://openrouter.ai/api/v1",
+                timeout=10
+            )
+            
+            response = openrouter_client.chat.completions.create(
+                model="openai/gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=5
+            )
+            
+            result["openrouter"] = "healthy"
+            logger.info("✅ OpenRouter provider is healthy")
+    except Exception as e:
+        result["openrouter"] = f"failed: {str(e)}"
+        logger.warning(f"⚠️ OpenRouter health check failed: {e}")
+    
+    return result
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """
