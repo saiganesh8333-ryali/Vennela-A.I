@@ -16,10 +16,11 @@ load_dotenv()
 # =========================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-GROQ_MODEL = "llama3-70b-8192"
-OPENROUTER_MODEL = "openai/gpt-4o-mini"
-TEMPERATURE = 0.7
-TIMEOUT = 30
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.7"))
+TIMEOUT = int(os.getenv("AI_TIMEOUT_SECONDS", "30"))
 
 
 # =========================
@@ -57,6 +58,12 @@ def _get_openrouter_client() -> Optional[OpenAI]:
     except Exception as e:
         logger.error(f"Failed to initialize OpenRouter client: {e}")
         return None
+
+
+def _groq_models() -> list:
+    """Return Groq models to try in order without duplicates."""
+    models = [GROQ_MODEL, GROQ_FALLBACK_MODEL]
+    return [model for index, model in enumerate(models) if model and model not in models[:index]]
 
 
 # =========================
@@ -115,24 +122,32 @@ def _try_groq(messages: list) -> Optional[Dict[str, str]]:
             logger.debug("Groq client not initialized")
             return None
         
-        logger.debug("Sending request to Groq...")
-        start_time = time.time()
-        
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=2048
-        )
-        
-        elapsed = time.time() - start_time
-        logger.info(f"Groq response received in {elapsed:.2f}s")
-        
-        return {
-            "provider": "Groq",
-            "response": response.choices[0].message.content,
-            "latency_ms": int(elapsed * 1000)
-        }
+        for model in _groq_models():
+            try:
+                logger.debug(f"Sending request to Groq model {model}...")
+                start_time = time.time()
+
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=TEMPERATURE,
+                    max_tokens=2048
+                )
+
+                elapsed = time.time() - start_time
+                logger.info(f"Groq response received from {model} in {elapsed:.2f}s")
+
+                return {
+                    "provider": "Groq",
+                    "model": model,
+                    "response": response.choices[0].message.content,
+                    "latency_ms": int(elapsed * 1000)
+                }
+            except APIError as e:
+                logger.warning(f"Groq API error for model {model}: {e}")
+                continue
+
+        return None
         
     except RateLimitError as e:
         logger.warning(f"Groq rate limit hit: {e}")
@@ -179,6 +194,7 @@ def _try_openrouter(messages: list) -> Optional[Dict[str, str]]:
         
         return {
             "provider": "OpenRouter",
+            "model": OPENROUTER_MODEL,
             "response": response.choices[0].message.content,
             "latency_ms": int(elapsed * 1000)
         }

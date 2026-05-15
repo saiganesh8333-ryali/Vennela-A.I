@@ -40,6 +40,10 @@ Be friendly, thoughtful, and always try to understand the user's underlying need
 
 RECENT_CHAT_LIMIT = int(os.getenv("RECENT_CHAT_LIMIT", "20"))
 MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "5000"))
+AI_UNAVAILABLE_REPLY = os.getenv(
+    "AI_UNAVAILABLE_REPLY",
+    "AI temporarily unavailable. Please try again in a moment."
+)
 
 # Rate limiting
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
@@ -84,6 +88,7 @@ class ChatResponse(BaseModel):
     relevant_memory: Optional[str] = None
     memory_summary: Optional[str] = None
     latency_ms: Optional[int] = None
+    error: Optional[str] = None
 
 
 # =========================
@@ -297,6 +302,20 @@ def load_messages(user_id: str, smart_memory: Dict, relevant_memory: Optional[st
         return messages
 
 
+def _minimal_memory() -> Dict:
+    """Return a safe empty memory object when memory services are unavailable."""
+    return {
+        "profile": {},
+        "short_term": [],
+        "long_term": [],
+        "emotions": {},
+        "sentiments": {},
+        "importance": [],
+        "summary": "",
+        "embeddings": []
+    }
+
+
 # =========================
 # API ENDPOINTS
 # =========================
@@ -347,11 +366,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 detail=f"Rate limit exceeded. Max {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW_MINUTES} minute(s)"
             )
         
-        # Load memory
-        memory = get_memory(user_id)
-        
-        # Retrieve relevant memory
-        relevant_memory = retrieve_memory(memory, user_message)
+        # Load memory, but keep chat alive if Firebase or memory retrieval fails.
+        try:
+            memory = get_memory(user_id)
+        except Exception as e:
+            logger.error(f"Memory load failed for {user_id}: {e}", exc_info=True)
+            memory = _minimal_memory()
+
+        try:
+            relevant_memory = retrieve_memory(memory, user_message)
+        except Exception as e:
+            logger.error(f"Relevant memory retrieval failed for {user_id}: {e}", exc_info=True)
+            relevant_memory = None
         
         # Save user message
         save_message(user_id, "user", user_message)
@@ -366,21 +392,34 @@ async def chat(request: ChatRequest) -> ChatResponse:
         logger.info(f"Chat context loaded with {len(messages)} messages")
         
         # Get AI response
-        ai_result = get_ai_response(messages)
+        try:
+            ai_result = get_ai_response(messages)
+        except Exception as e:
+            logger.error(f"AI provider call failed: {e}", exc_info=True)
+            ai_result = {
+                "provider": "error",
+                "response": AI_UNAVAILABLE_REPLY,
+                "error": str(e)
+            }
+
         ai_reply = ai_result.get("response", "")
         provider = ai_result.get("provider", "unknown")
-        latency_ms = ai_result.get("latency_ms")
         
         if not ai_reply:
             logger.error("Empty response from AI provider")
-            raise HTTPException(status_code=500, detail="No response from AI provider")
+            ai_reply = AI_UNAVAILABLE_REPLY
+            provider = "error"
         
         # Save AI response
         save_message(user_id, "assistant", ai_reply)
         
-        # Update memory
-        updated_memory = update_memory(user_id, user_message, ai_reply, memory)
-        save_memory(user_id, updated_memory)
+        # Update memory, but never block the chat response on memory writes.
+        try:
+            updated_memory = update_memory(user_id, user_message, ai_reply, memory)
+            save_memory(user_id, updated_memory)
+        except Exception as e:
+            logger.error(f"Memory update failed for {user_id}: {e}", exc_info=True)
+            updated_memory = memory
         
         elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(f"Chat response sent ({provider}, {elapsed_ms}ms)")
@@ -390,14 +429,21 @@ async def chat(request: ChatRequest) -> ChatResponse:
             provider=provider,
             relevant_memory=relevant_memory,
             memory_summary=updated_memory.get("summary"),
-            latency_ms=elapsed_ms
+            latency_ms=elapsed_ms,
+            error=ai_result.get("error")
         )
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Unexpected error in chat endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        return ChatResponse(
+            reply=AI_UNAVAILABLE_REPLY,
+            provider="error",
+            latency_ms=elapsed_ms,
+            error=str(e)
+        )
 
 
 @app.get("/memory/{user_id}")

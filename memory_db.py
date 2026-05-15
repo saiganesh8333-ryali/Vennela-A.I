@@ -1,11 +1,4 @@
-import firebase_admin
-from firebase_admin import credentials, firestore
+"""Compatibility wrapper for older imports."""
+from firebase_db import get_db
 
-# 🔐 Initialize Firebase only once
-if not firebase_admin._apps:
-
-    cred = credentials.Certificate("serviceAccount.json")
-    firebase_admin.initialize_app(cred)
-
-# ☁️ Firestore client
-db = firestore.client()
+db = get_db()

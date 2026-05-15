@@ -12,12 +12,40 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_FALLBACK_MODEL
+        value: llama-3.1-8b-instant
       - key: OPENROUTER_API_KEY
         sync: false
-      - key: FIREBASE_CREDENTIALS
-        value: vennela-firebase-key.json
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o-mini
+      - key: FIREBASE_ENABLED
+        value: "true"
       - key: FIREBASE_CREDENTIALS_JSON
         sync: false
+      - key: FIREBASE_TYPE
+        value: service_account
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_CLIENT_ID
+        sync: false
+      - key: FIREBASE_AUTH_URI
+        value: https://accounts.google.com/o/oauth2/auth
+      - key: FIREBASE_TOKEN_URI
+        value: https://oauth2.googleapis.com/token
+      - key: FIREBASE_AUTH_PROVIDER_X509_CERT_URL
+        value: https://www.googleapis.com/oauth2/v1/certs
+      - key: FIREBASE_CLIENT_X509_CERT_URL
+        sync: false
+      - key: FIREBASE_UNIVERSE_DOMAIN
+        value: googleapis.com
       - key: RECENT_CHAT_LIMIT
         value: "20"
       - key: MAX_MESSAGE_LENGTH
