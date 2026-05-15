@@ -38,6 +38,7 @@ MANIFEST
 serviceAccount.json
 credentials.json
 vennela-firebase-adminsdk-*.json
+*firebase-adminsdk*.json
 vennela-firebase-key.json
 vennela-firebase-service-account.json
 *.key

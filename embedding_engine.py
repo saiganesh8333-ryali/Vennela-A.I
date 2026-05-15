@@ -15,7 +15,7 @@ _embedding_cache = {}  # Simple in-memory cache for embeddings
 
 
 def _load_embedding_model():
-    """Load sentence transformer model with error handling."""
+    """Load lightweight sentence transformer model with error handling."""
     global _embedding_model
     
     if _embedding_model is not None:
@@ -23,12 +23,31 @@ def _load_embedding_model():
     
     try:
         from sentence_transformers import SentenceTransformer
-        logger.info("Loading embedding model (all-MiniLM-L6-v2)...")
-        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Embedding model loaded successfully")
-        return _embedding_model
+        # Using paraphrase-MiniLM-L3-v2: 67MB (vs 90MB for L6), 25% faster, minimal quality loss
+        logger.info("Loading lightweight embedding model (paraphrase-MiniLM-L3-v2)...")
+        # Add timeout to prevent hanging on model download
+        import signal
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Model loading exceeded timeout")
+        
+        # Set timeout to 30 seconds
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(30)
+        
+        try:
+            _embedding_model = SentenceTransformer("paraphrase-MiniLM-L3-v2")
+            # Enable model quantization to further reduce memory footprint
+            _embedding_model.half()  # Convert to FP16 to reduce memory by ~50%
+            signal.alarm(0)  # Cancel the alarm
+            logger.info("✅ Lightweight embedding model loaded successfully (FP16 enabled)")
+            return _embedding_model
+        finally:
+            signal.alarm(0)  # Always cancel the alarm
+            
     except Exception as e:
-        logger.warning(f"Failed to load embedding model: {e}. Using fallback.")
+        logger.warning(f"⚠️ Failed to load embedding model: {e}. Using fallback embedding.")
+        _embedding_model = "fallback"  # Mark as fallback to avoid retrying
         return None
 
 

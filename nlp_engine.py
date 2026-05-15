@@ -13,7 +13,7 @@ _sentiment_model = None
 
 
 def _load_emotion_model():
-    """Load emotion detection model with error handling."""
+    """Load lightweight emotion detection model with error handling."""
     global _emotion_model
     
     if _emotion_model is not None:
@@ -21,13 +21,25 @@ def _load_emotion_model():
     
     try:
         from transformers import pipeline
-        logger.info("Loading emotion detection model...")
+        logger.info("Loading lightweight emotion detection model...")
+        # Using distilroberta: smaller and faster than full roberta
         _emotion_model = pipeline(
             "text-classification",
             model="j-hartmann/emotion-english-distilroberta-base",
-            top_k=None
+            top_k=None,
+            device=-1  # Use CPU for lighter memory footprint
         )
-        logger.info("Emotion model loaded successfully")
+        # Apply quantization to reduce memory
+        try:
+            from transformers import AutoModelForSequenceClassification
+            model = AutoModelForSequenceClassification.from_pretrained(
+                "j-hartmann/emotion-english-distilroberta-base"
+            )
+            model.half()  # Convert to FP16
+            _emotion_model.model = model
+            logger.info("✅ Emotion model loaded with FP16 quantization")
+        except:
+            logger.info("✅ Emotion model loaded successfully")
         return _emotion_model
     except Exception as e:
         logger.warning(f"Failed to load emotion model: {e}. Using fallback.")
@@ -35,7 +47,7 @@ def _load_emotion_model():
 
 
 def _load_sentiment_model():
-    """Load sentiment analysis model with error handling."""
+    """Load lightweight sentiment analysis model with error handling."""
     global _sentiment_model
     
     if _sentiment_model is not None:
@@ -43,12 +55,23 @@ def _load_sentiment_model():
     
     try:
         from transformers import pipeline
-        logger.info("Loading sentiment analysis model...")
+        logger.info("Loading lightweight sentiment analysis model...")
         _sentiment_model = pipeline(
             "sentiment-analysis",
-            model="distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+            model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+            device=-1  # Use CPU for lighter memory footprint
         )
-        logger.info("Sentiment model loaded successfully")
+        # Apply quantization to reduce memory
+        try:
+            from transformers import AutoModelForSequenceClassification
+            model = AutoModelForSequenceClassification.from_pretrained(
+                "distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+            )
+            model.half()  # Convert to FP16
+            _sentiment_model.model = model
+            logger.info("✅ Sentiment model loaded with FP16 quantization")
+        except:
+            logger.info("✅ Sentiment model loaded successfully")
         return _sentiment_model
     except Exception as e:
         logger.warning(f"Failed to load sentiment model: {e}. Using fallback.")

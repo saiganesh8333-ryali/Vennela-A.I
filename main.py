@@ -99,13 +99,22 @@ async def startup_event():
     """Initialize services on startup."""
     logger.info("Starting Vennela AI...")
     
-    # Initialize Firebase
-    if not initialize_firebase():
-        logger.error("Failed to initialize Firebase. Some features may not work.")
+    try:
+        # Initialize Firebase
+        if not initialize_firebase():
+            logger.warning("Firebase initialization failed. Using fallback mode.")
+    except Exception as e:
+        logger.error(f"Startup error during Firebase init: {e}", exc_info=True)
     
-    # Verify environment
-    if not os.getenv("GROQ_API_KEY") and not os.getenv("OPENROUTER_API_KEY"):
-        logger.warning("No AI provider keys found. Chat will not work.")
+    try:
+        # Verify environment
+        groq_key = os.getenv("GROQ_API_KEY")
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        
+        if not groq_key and not openrouter_key:
+            logger.warning("No AI provider keys found. Chat will use fallback.")
+    except Exception as e:
+        logger.error(f"Startup error during environment check: {e}", exc_info=True)
     
     logger.info("Vennela AI startup complete")
 
