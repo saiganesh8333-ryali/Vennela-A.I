@@ -146,6 +146,62 @@ async def log_requests(request: Request, call_next):
 
 
 # =========================
+# BAD RESPONSE FILTERING
+# =========================
+BAD_PATTERNS = [
+    "system online",
+    "listening",
+    "how can i assist",
+    "i'm ready to help",
+    "hello i am vennela",
+    "i am vennela",
+    "i'm vennela",
+    "ready to help",
+    "system is online"
+]
+
+
+def is_greeting_response(content: str) -> bool:
+    """
+    Check if response contains greeting/startup patterns.
+    
+    Args:
+        content: Message content
+        
+    Returns:
+        bool: True if contains bad patterns
+    """
+    lower_content = content.lower().strip()
+    return any(pattern in lower_content for pattern in BAD_PATTERNS)
+
+
+def filter_history(messages: list) -> list:
+    """
+    Remove messages with bad greeting patterns.
+    
+    Args:
+        messages: List of message dicts
+        
+    Returns:
+        Filtered list without bad patterns
+    """
+    filtered = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            filtered.append(msg)
+            continue
+        
+        content = msg.get("content", "")
+        if is_greeting_response(content):
+            logger.debug(f"⚠️ Filtering out greeting response: {content[:50]}...")
+            continue
+        
+        filtered.append(msg)
+    
+    return filtered
+
+
+# =========================
 # RATE LIMITING
 # =========================
 def check_rate_limit(user_id: str) -> bool:
@@ -185,7 +241,7 @@ def check_rate_limit(user_id: str) -> bool:
 # =========================
 def save_message(user_id: str, role: str, content: str) -> bool:
     """
-    Save message to Firestore.
+    Save message to Firestore (skip if greeting response).
     
     Args:
         user_id: User identifier
@@ -196,6 +252,11 @@ def save_message(user_id: str, role: str, content: str) -> bool:
         bool: True if successful
     """
     try:
+        # Never save assistant greeting responses
+        if role == "assistant" and is_greeting_response(content):
+            logger.info(f"⏭️ Skipping greeting response: {content[:50]}...")
+            return True
+        
         db = get_db()
         if not db:
             logger.error("Database not available")
@@ -260,6 +321,7 @@ RELEVANT MEMORY FOR THIS MESSAGE:
 def load_messages(user_id: str, smart_memory: Dict, relevant_memory: Optional[str] = None) -> list:
     """
     Load recent chat history with smart memory context.
+    Filters out greeting responses and limits to 6 messages.
     
     Args:
         user_id: User identifier
@@ -273,7 +335,6 @@ def load_messages(user_id: str, smart_memory: Dict, relevant_memory: Optional[st
         db = get_db()
         if not db:
             logger.warning("Database not available - creating minimal context")
-            # Return minimal context without chat history (for development)
             messages = [
                 {
                     "role": "system",
@@ -305,11 +366,22 @@ def load_messages(user_id: str, smart_memory: Dict, relevant_memory: Optional[st
                     "content": data["content"]
                 })
         
-        return messages
+        # Filter out greeting responses from history
+        messages = filter_history(messages)
+        
+        # Keep only system + last 6 messages to avoid old bad behavior
+        system_msg = [msg for msg in messages if msg.get("role") == "system"]
+        other_msgs = [msg for msg in messages if msg.get("role") != "system"]
+        other_msgs = other_msgs[-6:]
+        
+        filtered_messages = system_msg + other_msgs
+        
+        logger.info(f"📋 Loaded {len(filtered_messages)} messages (system + {len(other_msgs)} history)")
+        
+        return filtered_messages
         
     except Exception as e:
         logger.error(f"Error loading messages: {e}")
-        # Still return system message with memory context
         messages = [
             {
                 "role": "system",
@@ -494,6 +566,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
             logger.error(f"Failed to load chat messages for {user_id}")
             raise HTTPException(status_code=500, detail="Failed to load chat context")
         
+        # DEBUG: Log message structure before sending to Groq
+        logger.debug("=" * 60)
+        logger.debug("🔍 DEBUG: Message structure before Groq call:")
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")[:100]
+            logger.debug(f"  [{i}] {role}: {content}...")
+        logger.debug("=" * 60)
+        
         logger.info(f"Chat context loaded with {len(messages)} messages")
         
         # Get AI response
@@ -515,7 +596,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             ai_reply = AI_UNAVAILABLE_REPLY
             provider = "error"
         
-        # Save AI response
+        # Save AI response (filtered in save_message)
         save_message(user_id, "assistant", ai_reply)
         
         # Update memory, but never block the chat response on memory writes.
