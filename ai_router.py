@@ -1,225 +1,301 @@
-"""AI routing with Groq and OpenRouter with enhanced error handling and logging."""
+"""AI routing with Groq and OpenRouter."""
+
 import logging
 import os
 import time
 from typing import Dict, Optional
 
 from dotenv import load_dotenv
-from openai import OpenAI, APIError, RateLimitError, APIConnectionError
-
-logger = logging.getLogger(__name__)
+from openai import OpenAI
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # =========================
 # CONFIGURATION
 # =========================
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+GROQ_MODEL = os.getenv(
+    "GROQ_MODEL",
+    "llama-3.3-70b-versatile"
+)
+
+GROQ_FALLBACK_MODEL = os.getenv(
+    "GROQ_FALLBACK_MODEL",
+    "llama-3.1-8b-instant"
+)
+
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "openai/gpt-4o-mini"
+)
+
 TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.7"))
+
 TIMEOUT = int(os.getenv("AI_TIMEOUT_SECONDS", "30"))
 
+MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "500"))
 
 # =========================
-# CLIENT INITIALIZATION
+# BAD RESPONSE FILTER
 # =========================
-def _get_groq_client() -> Optional[OpenAI]:
-    """Initialize Groq client with error handling."""
+
+BAD_PATTERNS = [
+    "system online",
+    "listening...",
+    "how can i assist",
+    "i'm ready to help",
+    "i am ready to assist",
+    "what's on your mind",
+    "ready to engage",
+    "provide information",
+]
+
+
+def is_bad_response(text: str) -> bool:
+    """
+    Detect unwanted assistant startup replies.
+    """
+
+    if not text:
+        return True
+
+    lower = text.lower().strip()
+
+    return any(pattern in lower for pattern in BAD_PATTERNS)
+
+
+# =========================
+# CLIENTS
+# =========================
+
+def get_groq_client() -> Optional[OpenAI]:
+
     if not GROQ_API_KEY:
-        logger.warning("GROQ_API_KEY not set in environment")
+        logger.warning("❌ GROQ_API_KEY missing")
         return None
-    
+
     try:
         return OpenAI(
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
             timeout=TIMEOUT
         )
+
     except Exception as e:
-        logger.error(f"Failed to initialize Groq client: {e}")
+        logger.error(f"Groq client init failed: {e}")
         return None
 
 
-def _get_openrouter_client() -> Optional[OpenAI]:
-    """Initialize OpenRouter client with error handling."""
+def get_openrouter_client() -> Optional[OpenAI]:
+
     if not OPENROUTER_API_KEY:
-        logger.warning("OPENROUTER_API_KEY not set in environment")
+        logger.warning("❌ OPENROUTER_API_KEY missing")
         return None
-    
+
     try:
         return OpenAI(
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
             timeout=TIMEOUT
         )
+
     except Exception as e:
-        logger.error(f"Failed to initialize OpenRouter client: {e}")
+        logger.error(f"OpenRouter client init failed: {e}")
         return None
 
 
-def _groq_models() -> list:
-    """Return Groq models to try in order without duplicates."""
-    models = [GROQ_MODEL, GROQ_FALLBACK_MODEL]
-    return [model for index, model in enumerate(models) if model and model not in models[:index]]
-
-
 # =========================
-# AI RESPONSE GENERATION
+# MAIN AI FUNCTION
 # =========================
+
 def get_ai_response(messages: list) -> Dict[str, str]:
     """
-    Get AI response with provider failover and error handling.
-    
-    Tries Groq first, falls back to OpenRouter, then returns error message.
-    Production-level JARVIS-style redundancy system.
-    
-    Args:
-        messages: List of message dicts with "role" and "content"
-                 Expected format: [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, ...]
-        
-    Returns:
-        Dict with "provider" and "response" keys
+    Main AI routing function.
     """
+
     if not messages:
-        logger.error("❌ No messages provided to get_ai_response")
         return {
             "provider": "error",
-            "response": "No messages provided"
+            "response": "No messages provided.",
+            "error": "empty_messages"
         }
-    
-    # Verify system message is present
-    has_system = any(msg.get("role") == "system" for msg in messages)
+
+    # Ensure system prompt exists
+    has_system = any(
+        msg.get("role") == "system"
+        for msg in messages
+    )
+
     if not has_system:
-        logger.warning("⚠️ No system message in messages array - adding default")
-        messages = [{"role": "system", "content": "You are VENNELA AI. Respond naturally and directly."}, *messages]
-    
+
+        messages.insert(0, {
+            "role": "system",
+            "content": (
+                "You are VENNELA AI. "
+                "Reply naturally and directly. "
+                "Do not repeat greetings. "
+                "Do not say system online."
+            )
+        })
+
     # Try Groq first
-    logger.info("🚀 Attempting to use Groq provider...")
-    response = _try_groq(messages)
-    if response:
-        logger.info("✅ Successfully using Groq")
-        return response
-    
-    # Fallback to OpenRouter
-    logger.warning("⚠️ Groq failed, switching to OpenRouter fallback...")
-    response = _try_openrouter(messages)
-    if response:
-        logger.info("✅ Successfully switched to OpenRouter")
-        return response
-    
+    groq_response = try_groq(messages)
+
+    if groq_response:
+        return groq_response
+
+    # Fallback OpenRouter
+    openrouter_response = try_openrouter(messages)
+
+    if openrouter_response:
+        return openrouter_response
+
     # Final fail-safe
-    logger.critical("❌ CRITICAL: Both Groq and OpenRouter failed - no AI providers available")
     return {
-        "provider": "none",
-        "response": "Both AI providers unavailable. Please try again later."
+        "provider": "error",
+        "response": (
+            "AI temporarily unavailable. "
+            "Please try again."
+        ),
+        "error": "all_providers_failed"
     }
 
 
-def _try_groq(messages: list) -> Optional[Dict[str, str]]:
-    """
-    Try to get response from Groq.
-    
-    Args:
-        messages: List of message dicts
-        
-    Returns:
-        Dict with response or None if failed
-    """
-    try:
-        client = _get_groq_client()
-        if not client:
-            logger.debug("⚠️ Groq client not initialized - API key missing or invalid")
-            return None
-        
-        for model in _groq_models():
-            try:
-                logger.debug(f"📤 Sending request to Groq model {model}...")
-                start_time = time.time()
+# =========================
+# GROQ
+# =========================
 
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=TEMPERATURE,
-                    max_tokens=2048
+def try_groq(messages: list) -> Optional[Dict[str, str]]:
+
+    client = get_groq_client()
+
+    if not client:
+        return None
+
+    models = [
+        GROQ_MODEL,
+        GROQ_FALLBACK_MODEL
+    ]
+
+    tried = set()
+
+    for model in models:
+
+        if not model or model in tried:
+            continue
+
+        tried.add(model)
+
+        try:
+
+            logger.info(f"🚀 Using Groq model: {model}")
+
+            start = time.time()
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS
+            )
+
+            elapsed = int((time.time() - start) * 1000)
+
+            ai_reply = (
+                response.choices[0]
+                .message
+                .content
+                .strip()
+            )
+
+            logger.info(f"✅ Groq success ({elapsed}ms)")
+            logger.info(f"RAW: {ai_reply[:120]}")
+
+            # Prevent weird startup replies
+            if is_bad_response(ai_reply):
+
+                logger.warning(
+                    "⚠️ Bad response filtered from Groq"
                 )
 
-                elapsed = time.time() - start_time
-                logger.info(f"✅ Groq response received from {model} in {elapsed:.2f}s")
-
-                return {
-                    "provider": "Groq",
-                    "model": model,
-                    "response": response.choices[0].message.content,
-                    "latency_ms": int(elapsed * 1000)
-                }
-            except APIError as e:
-                logger.warning(f"❌ Groq API error for model {model}: {e}")
                 continue
 
-        return None
-        
-    except RateLimitError as e:
-        logger.warning(f"⏱️ Groq rate limit hit: {e}")
-        return None
-    except APIConnectionError as e:
-        logger.warning(f"🔌 Groq connection error: {e}")
-        return None
-    except APIError as e:
-        logger.warning(f"❌ Groq API error: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Unexpected error from Groq: {e}")
-        return None
+            return {
+                "provider": "Groq",
+                "model": model,
+                "response": ai_reply,
+                "latency_ms": elapsed
+            }
+
+        except Exception as e:
+
+            logger.warning(
+                f"❌ Groq model failed ({model}): {e}"
+            )
+
+            continue
+
+    return None
 
 
-def _try_openrouter(messages: list) -> Optional[Dict[str, str]]:
-    """
-    Try to get response from OpenRouter (fallback provider).
-    
-    Args:
-        messages: List of message dicts
-        
-    Returns:
-        Dict with response or None if failed
-    """
+# =========================
+# OPENROUTER FALLBACK
+# =========================
+
+def try_openrouter(messages: list) -> Optional[Dict[str, str]]:
+
+    client = get_openrouter_client()
+
+    if not client:
+        return None
+
     try:
-        client = _get_openrouter_client()
-        if not client:
-            logger.debug("⚠️ OpenRouter client not initialized - API key missing or invalid")
-            return None
-        
-        logger.debug("📤 Sending request to OpenRouter (fallback)...")
-        start_time = time.time()
-        
+
+        logger.info("⚡ Switching to OpenRouter fallback")
+
+        start = time.time()
+
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
             messages=messages,
             temperature=TEMPERATURE,
-            max_tokens=2048
+            max_tokens=MAX_TOKENS
         )
-        
-        elapsed = time.time() - start_time
-        logger.info(f"✅ OpenRouter response received in {elapsed:.2f}s (FALLBACK SUCCESS)")
-        
+
+        elapsed = int((time.time() - start) * 1000)
+
+        ai_reply = (
+            response.choices[0]
+            .message
+            .content
+            .strip()
+        )
+
+        logger.info(f"✅ OpenRouter success ({elapsed}ms)")
+        logger.info(f"RAW: {ai_reply[:120]}")
+
+        if is_bad_response(ai_reply):
+
+            logger.warning(
+                "⚠️ Bad response filtered from OpenRouter"
+            )
+
+            return None
+
         return {
             "provider": "OpenRouter",
             "model": OPENROUTER_MODEL,
-            "response": response.choices[0].message.content,
-            "latency_ms": int(elapsed * 1000)
+            "response": ai_reply,
+            "latency_ms": elapsed
         }
-        
-    except RateLimitError as e:
-        logger.warning(f"⏱️ OpenRouter rate limit hit: {e}")
-        return None
-    except APIConnectionError as e:
-        logger.warning(f"🔌 OpenRouter connection error: {e}")
-        return None
-    except APIError as e:
-        logger.warning(f"❌ OpenRouter API error: {e}")
-        return None
+
     except Exception as e:
-        logger.error(f"❌ Unexpected error from OpenRouter: {e}")
+
+        logger.warning(f"❌ OpenRouter failed: {e}")
+
         return None
