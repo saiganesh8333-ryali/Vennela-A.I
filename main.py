@@ -490,6 +490,46 @@ async def ai_health_check():
     return result
 
 
+@app.post("/chat-minimal")
+async def chat_minimal(request: ChatRequest):
+    """
+    MINIMAL TEST ENDPOINT - Pure Groq without any logic.
+    Use this to debug: does Groq work with new prompt?
+    """
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": VENNELA_PROMPT
+            },
+            {
+                "role": "user",
+                "content": request.message
+            }
+        ]
+        
+        logger.info(f"📤 MINIMAL TEST: Sending to Groq")
+        logger.info(f"System: {VENNELA_PROMPT[:100]}...")
+        logger.info(f"User: {request.message}")
+        
+        ai_result = get_ai_response(messages)
+        
+        logger.info(f"📥 MINIMAL TEST RESPONSE: {ai_result.get('response', '')[:100]}...")
+        
+        return {
+            "reply": ai_result.get("response", ""),
+            "provider": ai_result.get("provider", "unknown"),
+            "test": "minimal"
+        }
+    except Exception as e:
+        logger.error(f"Minimal test error: {e}", exc_info=True)
+        return {
+            "reply": f"Error: {str(e)}",
+            "provider": "error",
+            "test": "minimal"
+        }
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     """
