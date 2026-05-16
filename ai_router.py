@@ -46,7 +46,7 @@ MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "500"))
 
 BAD_PATTERNS = [
     "system online",
-    "listening...",
+    "listening",
     "how can i assist",
     "i'm ready to help",
     "i am ready to assist",
@@ -57,9 +57,6 @@ BAD_PATTERNS = [
 
 
 def is_bad_response(text: str) -> bool:
-    """
-    Detect unwanted assistant startup replies.
-    """
 
     if not text:
         return True
@@ -114,9 +111,6 @@ def get_openrouter_client() -> Optional[OpenAI]:
 # =========================
 
 def get_ai_response(messages: list) -> Dict[str, str]:
-    """
-    Main AI routing function.
-    """
 
     if not messages:
         return {
@@ -125,7 +119,7 @@ def get_ai_response(messages: list) -> Dict[str, str]:
             "error": "empty_messages"
         }
 
-    # Ensure system prompt exists
+    # Ensure system message exists
     has_system = any(
         msg.get("role") == "system"
         for msg in messages
@@ -142,6 +136,14 @@ def get_ai_response(messages: list) -> Dict[str, str]:
                 "Do not say system online."
             )
         })
+
+    # DEBUG LOGGING
+    print("\n===== FINAL MESSAGES SENT TO AI =====\n")
+
+    for msg in messages:
+        print(msg)
+
+    print("\n=====================================\n")
 
     # Try Groq first
     groq_response = try_groq(messages)
@@ -216,7 +218,6 @@ def try_groq(messages: list) -> Optional[Dict[str, str]]:
             logger.info(f"✅ Groq success ({elapsed}ms)")
             logger.info(f"RAW: {ai_reply[:120]}")
 
-            # Prevent weird startup replies
             if is_bad_response(ai_reply):
 
                 logger.warning(
