@@ -78,6 +78,7 @@ def get_ai_response(messages: list) -> Dict[str, str]:
     
     Args:
         messages: List of message dicts with "role" and "content"
+                 Expected format: [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, ...]
         
     Returns:
         Dict with "provider" and "response" keys
@@ -88,6 +89,12 @@ def get_ai_response(messages: list) -> Dict[str, str]:
             "provider": "error",
             "response": "No messages provided"
         }
+    
+    # Verify system message is present
+    has_system = any(msg.get("role") == "system" for msg in messages)
+    if not has_system:
+        logger.warning("⚠️ No system message in messages array - adding default")
+        messages = [{"role": "system", "content": "You are VENNELA AI. Respond naturally and directly."}, *messages]
     
     # Try Groq first
     logger.info("🚀 Attempting to use Groq provider...")

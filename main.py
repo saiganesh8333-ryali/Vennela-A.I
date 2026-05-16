@@ -35,9 +35,15 @@ app = FastAPI(
 )
 
 # Prompt
-VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", """You are Vennela, a helpful AI assistant with semantic memory. 
-You remember important details about users and provide personalized, contextual responses. 
-Be friendly, thoughtful, and always try to understand the user's underlying needs.""")
+VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", """You are VENNELA AI.
+
+Always respond directly to the user's question.
+Do not greet repeatedly.
+Do not say system online.
+Do not repeat introductions.
+Respond naturally.
+
+Be helpful, thoughtful, and understand the user's underlying needs.""")
 
 RECENT_CHAT_LIMIT = int(os.getenv("RECENT_CHAT_LIMIT", "20"))
 MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "5000"))
@@ -234,8 +240,7 @@ def format_smart_memory(
     
     relevant_memory_str = relevant_memory or "No directly relevant memory found."
     
-    return f"""
-{VENNELA_PROMPT}
+    system_content = f"""{VENNELA_PROMPT}
 
 USER PROFILE:
 {summary}
@@ -247,8 +252,9 @@ SENTIMENT TRENDS:
 {sentiment_summary}
 
 RELEVANT MEMORY FOR THIS MESSAGE:
-{relevant_memory_str}
-"""
+{relevant_memory_str}"""
+    
+    return system_content
 
 
 def load_messages(user_id: str, smart_memory: Dict, relevant_memory: Optional[str] = None) -> list:
