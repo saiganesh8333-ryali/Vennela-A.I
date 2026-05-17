@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+.venv/
+venv/
+
+# VS Code
+.vscode/
+
+# Cache
+.hf_cache/
+.cache/
+
+# Firebase keys
+*.json
+
+# Logs
+*.log
+
+# Build files
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
