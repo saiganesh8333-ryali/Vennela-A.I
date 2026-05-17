@@ -11,12 +11,16 @@ venv/
 # VS Code
 .vscode/
 
-# Cache
+# HuggingFace / AI Cache
 .hf_cache/
 .cache/
 
-# Firebase keys
-*.json
+# Firebase Secret Keys
+firebase/*.json
+*firebase*.json
+
+# Environment Variables
+.env
 
 # Logs
 *.log
@@ -25,6 +29,6 @@ venv/
 build/
 dist/
 
-# OS
+# OS Files
 .DS_Store
 Thumbs.db
