@@ -1,4 +1,4 @@
-from firebase_db import db
+from firebase.firebase_db import db
 
 # ---------------- USER ---------------- #
 def get_user_data(user_id):

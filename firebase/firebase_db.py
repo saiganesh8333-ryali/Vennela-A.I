@@ -1,3 +1,4 @@
+#fire_base.py
 """Firebase database initialization for local development and cloud deploys."""
 import base64
 import json
