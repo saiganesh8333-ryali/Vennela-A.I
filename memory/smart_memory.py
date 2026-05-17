@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from ai.embedding_engine import get_embedding
+from memory.embedding_engine import get_embedding
 from firebase.firebase_db import get_db
 from ai.nlp_engine import detect_emotion, detect_sentiment
 from core.memory_core import process_memory
