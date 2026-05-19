@@ -1,4 +1,5 @@
 from firebase.firebase_db import db
+from datetime import datetime
 
 # ---------------- USER ---------------- #
 def get_user_data(user_id):
@@ -26,7 +27,7 @@ def save_memory(user_id, data):
 
 
 # ---------------- ADD CHAT ENTRY ---------------- #
-def add_chat(user_id, role, message):
+def add_chat(user_id, role, message, reinforcement_score=0.0, metadata=None):
     doc_ref = db.collection("memory").document(user_id)
 
     doc = doc_ref.get()
@@ -37,11 +38,18 @@ def add_chat(user_id, role, message):
     else:
         chat_history = []
 
-    chat_history.append({
+    entry = {
         "role": role,
-        "message": message
-    })
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "reinforcement_score": reinforcement_score,
+        "metadata": metadata or {}
+    }
+
+    chat_history.append(entry)
 
     doc_ref.set({
         "chat_history": chat_history
     }, merge=True)
+
+    return entry
