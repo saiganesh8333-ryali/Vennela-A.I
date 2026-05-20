@@ -4,24 +4,91 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: python main.py
     envVars:
+      # Python Configuration
       - key: PYTHON_VERSION
         value: 3.11.9
-      - key: VENNELA_PROMPT
+      
+      # Gemini API (Primary LLM - Phase A)
+      - key: GEMINI_API_KEY
         sync: false
+      
+      # Groq API (Fallback Provider - Phase A)
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
         value: llama-3.3-70b-versatile
       - key: GROQ_FALLBACK_MODEL
         value: llama-3.1-8b-instant
+      
+      # OpenRouter API (Final Fallback - Phase A)
       - key: OPENROUTER_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
         value: openai/gpt-4o-mini
-      - key: FIREBASE_ENABLED
+      
+      # LLM Router Configuration (Phase A)
+      - key: LLM_ROUTER_ENABLED
         value: "true"
+      - key: COST_TRACKING_ENABLED
+        value: "true"
+      - key: HEALTH_CHECK_INTERVAL_SECONDS
+        value: "300"
+      
+      # Event Bus Configuration (Phase B)
+      - key: EVENT_BUS_ENABLED
+        value: "true"
+      - key: EVENT_HISTORY_MAX_SIZE
+        value: "1000"
+      - key: EVENT_QUEUE_MAX_SIZE
+        value: "10000"
+      
+      # Memory Reflection Configuration (Phase C)
+      - key: MEMORY_REFLECTION_ENABLED
+        value: "true"
+      - key: CONSOLIDATION_INTERVAL_MINUTES
+        value: "5"
+      - key: IMPORTANCE_THRESHOLD
+        value: "0.3"
+      
+      # Voice Pipeline Configuration (Phase D)
+      - key: VOICE_PIPELINE_ENABLED
+        value: "true"
+      - key: WAKEWORD_DETECTION_ENABLED
+        value: "true"
+      - key: WAKEWORD_THRESHOLD
+        value: "0.85"
+      - key: AUDIO_BUFFER_SIZE
+        value: "100"
+      
+      # Autonomous Learning Configuration (Phase E)
+      - key: LEARNING_LOOP_ENABLED
+        value: "true"
+      - key: REINFORCEMENT_ENABLED
+        value: "true"
+      - key: FEEDBACK_COLLECTION_ENABLED
+        value: "true"
+      
+      # Adaptive Personality Configuration (Phase F)
+      - key: PERSONALITY_ADAPTATION_ENABLED
+        value: "true"
+      - key: MOOD_DETECTION_ENABLED
+        value: "true"
+      - key: EMOTION_IN_VOICE
+        value: "true"
+      
+      # Predictive Intent Configuration (Phase G)
+      - key: INTENT_PREDICTION_ENABLED
+        value: "true"
+      - key: PATTERN_DETECTION_ENABLED
+        value: "true"
+      - key: CONTEXT_PREDICTION_ENABLED
+        value: "true"
+      
+      # Firebase Configuration (Optional)
+      - key: FIREBASE_ENABLED
+        value: "false"
       - key: FIREBASE_CREDENTIALS_JSON
         sync: false
       - key: FIREBASE_TYPE
@@ -46,6 +113,10 @@ services:
         sync: false
       - key: FIREBASE_UNIVERSE_DOMAIN
         value: googleapis.com
+      
+      # Application Configuration
+      - key: VENNELA_PROMPT
+        sync: false
       - key: RECENT_CHAT_LIMIT
         value: "20"
       - key: MAX_MESSAGE_LENGTH
@@ -54,9 +125,17 @@ services:
         value: "100"
       - key: RATE_LIMIT_WINDOW_MINUTES
         value: "1"
+      
+      # Cache Configuration
       - key: HF_HOME
         value: /opt/render/project/src/.hf_cache
       - key: SENTENCE_TRANSFORMERS_HOME
         value: /opt/render/project/src/.hf_cache/sentence-transformers
       - key: HF_HUB_DISABLE_SYMLINKS_WARNING
         value: "1"
+      
+      # Logging Configuration
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DEBUG_MODE
+        value: "false"
