@@ -3,9 +3,13 @@ services:
     name: vennela-ai
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    buildCommand: pip install -r requirements-lightweight.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
+      # Lightweight mode
+      - key: LIGHTWEIGHT_MODE
+        value: "true"
+      
       # Python Configuration
       - key: PYTHON_VERSION
         value: 3.11.9

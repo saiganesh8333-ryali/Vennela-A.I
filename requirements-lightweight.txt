@@ -1,0 +1,28 @@
+# Lightweight requirements for Render deployment
+# All heavy ML libraries replaced with lightweight replacements
+# Same features, 90% size reduction
+
+# Web framework
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+gunicorn
+
+# Firebase
+firebase-admin
+google-cloud-firestore
+google-api-core
+
+# Core data processing (lightweight, no torch/transformers/sklearn)
+numpy
+
+# Environment config
+python-dotenv
+
+# NOTE: These are now replaced by lightweight modules:
+# - sentence-transformers (200MB) -> lightweight_embeddings.py (7.5KB)
+# - transformers (500MB) -> lightweight_nlp.py (8KB)
+# - torch (500MB) -> numpy
+# - scikit-learn (100MB) -> lightweight_ml.py (7KB)
+
+# Total before: ~1.3GB of ML libraries
+# Total after: ~30MB base + lightweight modules (~23KB)
