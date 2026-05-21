@@ -6,9 +6,43 @@ from typing import Dict
 from core.memory_classifier import classify_memory
 from core.memory_compressor import compress_memory
 
-from memory.smart_memory import importance_score
-
 logger = logging.getLogger(__name__)
+
+
+def importance_score(text: str) -> int:
+    """
+    Calculate importance score for a given text.
+    """
+    if not text or not isinstance(text, str):
+        return 0
+
+    text = text.lower()
+    score = 0
+
+    keyword_weights = {
+        "my name": 10,
+        "call me": 10,
+        "i want": 4,
+        "i need": 4,
+        "project": 4,
+        "goal": 4,
+        "learn": 3,
+        "i like": 3,
+        "i love": 3,
+        "remember": 5,
+        "error": 5,
+        "problem": 5,
+        "failed": 5
+    }
+
+    for keyword, weight in keyword_weights.items():
+        if keyword in text:
+            score += weight
+
+    if len(text) > 50:
+        score += 1
+
+    return min(score, 10)
 
 
 def process_memory(user_message: str) -> Dict:
