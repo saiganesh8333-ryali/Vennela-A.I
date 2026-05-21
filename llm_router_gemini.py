@@ -1,4 +1,10 @@
-"""Multi-LLM Router with Gemini, Groq, and OpenRouter support."""
+"""Multi-LLM Router with Gemini, Groq, and OpenRouter support.
+
+Phase 1: Intelligent LLM Routing
+- Complexity-based model selection
+- Cost optimization
+- Health-based fallback chains
+"""
 
 import logging
 import os
@@ -16,6 +22,11 @@ from llm_provider_manager import (
     ProviderResponse,
     UnifiedProviderManager
 )
+from llm_model_selector import (
+    get_model_selector,
+    ModelTier,
+    select_model_for_query
+)
 
 load_dotenv()
 
@@ -24,10 +35,11 @@ class MultiLLMRouter:
     """Intelligent router that selects optimal LLM provider and model."""
     
     def __init__(self):
-        """Initialize router."""
-        logger.info("Initializing Multi-LLM Router")
+        """Initialize router with intelligent model selection."""
+        logger.info("Initializing Multi-LLM Router with Phase 1 Model Selector")
         self.classifier = get_classifier()
         self.provider_manager = get_provider_manager()
+        self.model_selector = get_model_selector()
         self.routing_history = []
         self.max_history = 500
         self._gemini_client = None
@@ -55,10 +67,13 @@ class MultiLLMRouter:
         messages: Optional[List[Dict]] = None,
         conversation_length: int = 0,
         user_context: Optional[Dict] = None,
-        force_provider: Optional[str] = None
+        force_provider: Optional[str] = None,
+        is_voice: bool = False
     ) -> Dict[str, Any]:
         """
         Route query to best LLM provider and generate response.
+        
+        Phase 1: Intelligent Model Selection
         
         Args:
             query: User query
@@ -66,6 +81,7 @@ class MultiLLMRouter:
             conversation_length: Number of messages in conversation
             user_context: User profile data
             force_provider: Force specific provider (bypass routing)
+            is_voice: Is this a voice request?
             
         Returns:
             Response with routing metadata
@@ -73,19 +89,25 @@ class MultiLLMRouter:
         start_time = time.time()
         
         try:
-            # Classify intent
+            # PHASE 1: Complexity-based model selection
+            model_tier, selection_data = self.model_selector.select_model(
+                query,
+                conversation_length=conversation_length,
+                force_model=force_provider,
+                is_voice=is_voice
+            )
+            
+            logger.info(f"🧠 Phase 1 Model Selection: {model_tier.value} (complexity: {selection_data['complexity']:.2f})")
+            
+            # Classify intent (for compatibility with existing system)
             classification = self.classifier.classify_query(
                 query,
                 conversation_length,
                 user_context
             )
             
-            # Determine provider
-            if force_provider:
-                provider_type = ProviderType(force_provider)
-            else:
-                recommended = classification.get("recommended_provider")
-                provider_type = self._resolve_provider_type(recommended)
+            # Map ModelTier to ProviderType
+            provider_type = self._model_tier_to_provider(model_tier)
             
             # Try primary provider
             result = self._call_provider(
@@ -95,6 +117,14 @@ class MultiLLMRouter:
                 classification
             )
             
+            # Record latency for model selector learning
+            latency_ms = int((time.time() - start_time) * 1000)
+            self.model_selector.record_usage(
+                model_tier,
+                latency_ms,
+                success=result["success"]
+            )
+            
             if result["success"]:
                 # Record routing decision
                 self._record_routing(
@@ -102,7 +132,8 @@ class MultiLLMRouter:
                     provider_type.value,
                     result,
                     classification,
-                    time.time() - start_time
+                    latency_ms,
+                    selection_data=selection_data
                 )
                 return result
             
@@ -122,12 +153,14 @@ class MultiLLMRouter:
                         classification
                     )
                     if result["success"]:
+                        latency_ms = int((time.time() - start_time) * 1000)
                         self._record_routing(
                             query,
                             alt_provider_type.value,
                             result,
                             classification,
-                            time.time() - start_time
+                            latency_ms,
+                            selection_data=selection_data
                         )
                         return result
             
@@ -138,7 +171,8 @@ class MultiLLMRouter:
                 "error": "All LLM providers failed",
                 "provider": "none",
                 "response": "AI services temporarily unavailable",
-                "latency_ms": int((time.time() - start_time) * 1000)
+                "latency_ms": int((time.time() - start_time) * 1000),
+                "model_selector_data": selection_data
             }
             
         except Exception as e:
@@ -162,6 +196,17 @@ class MultiLLMRouter:
             "openrouter": ProviderType.OPENROUTER,
         }
         return mapping.get(provider_name, ProviderType.GEMINI_FLASH)
+    
+    def _model_tier_to_provider(self, model_tier: ModelTier) -> ProviderType:
+        """Convert ModelTier from selector to ProviderType."""
+        mapping = {
+            ModelTier.LITE: ProviderType.GEMINI_FLASH_LITE,
+            ModelTier.STANDARD: ProviderType.GEMINI_FLASH,
+            ModelTier.LIVE: ProviderType.GEMINI_LIVE,
+            ModelTier.FALLBACK_FAST: ProviderType.GROQ,
+            ModelTier.FALLBACK_DIVERSE: ProviderType.OPENROUTER,
+        }
+        return mapping.get(model_tier, ProviderType.GEMINI_FLASH_LITE)
     
     def _call_provider(
         self,
@@ -503,16 +548,18 @@ class MultiLLMRouter:
         provider: str,
         result: Dict,
         classification: Dict,
-        total_time: float
+        total_time: float,
+        selection_data: Optional[Dict] = None
     ) -> None:
-        """Record routing decision."""
+        """Record routing decision with Phase 1 model selection data."""
         record = {
             "query": query[:100],
             "provider": provider,
             "intent": classification.get("intent"),
             "latency_ms": result.get("latency_ms", 0),
             "success": result.get("success", False),
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "model_selector": selection_data  # Phase 1 data
         }
         
         self.routing_history.append(record)
