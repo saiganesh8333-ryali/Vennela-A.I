@@ -232,13 +232,123 @@ async def status():
     return {
         "status": "running",
         "lightweight_mode": LIGHTWEIGHT_MODE,
+        "phases": "1-5 (All systems active)",
         "modules": {
             "embeddings": "lightweight_embeddings",
             "nlp": "lightweight_nlp",
             "ml": "lightweight_ml",
+            "phase_4_proactive": "proactive_engine",
+            "phase_5_autonomous": "autonomous_engine",
         },
         "size_reduction": "90% smaller than full deployment"
     }
+
+
+# =========================
+# PHASE 4 & 5 ENDPOINTS
+# =========================
+
+class ProactiveSuggestionRequest(BaseModel):
+    topic: str
+    current_intent: str
+    user_patterns: Optional[Dict[str, Any]] = {}
+
+
+class ProactiveSuggestionResponse(BaseModel):
+    suggestions: List[Dict[str, Any]]
+    count: int
+
+
+@app.post("/phase4/suggestions", response_model=ProactiveSuggestionResponse, tags=["phase_4"])
+async def get_proactive_suggestions(request: ProactiveSuggestionRequest):
+    """Get proactive suggestions (Phase 4)"""
+    try:
+        from proactive_engine import get_proactive_engine
+        
+        engine = get_proactive_engine()
+        suggestions = engine.get_proactive_suggestions(
+            request.topic,
+            request.current_intent,
+            request.user_patterns or {}
+        )
+        
+        return ProactiveSuggestionResponse(
+            suggestions=suggestions,
+            count=len(suggestions)
+        )
+    except Exception as e:
+        logger.error(f"Proactive suggestion error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class GoalCreationRequest(BaseModel):
+    title: str
+    description: str
+    target_days: Optional[int] = 30
+    user_patterns: Optional[Dict[str, Any]] = {}
+
+
+class GoalCreationResponse(BaseModel):
+    goal_id: str
+    goal: Dict[str, Any]
+    plan: Dict[str, Any]
+
+
+@app.post("/phase5/goal", response_model=GoalCreationResponse, tags=["phase_5"])
+async def create_goal_with_plan(request: GoalCreationRequest):
+    """Create goal with autonomous action plan (Phase 5)"""
+    try:
+        from autonomous_engine import get_autonomous_engine
+        
+        engine = get_autonomous_engine()
+        plan = engine.create_and_plan_goal(
+            request.title,
+            request.description,
+            request.user_patterns or {},
+            request.target_days
+        )
+        
+        return GoalCreationResponse(
+            goal_id=plan["goal_id"],
+            goal=plan["goal"],
+            plan=plan["plan"]
+        )
+    except Exception as e:
+        logger.error(f"Goal creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ActionRecommendationRequest(BaseModel):
+    goal_id: str
+
+
+class ActionRecommendationResponse(BaseModel):
+    action: Optional[Dict[str, Any]]
+    message: str
+
+
+@app.post("/phase5/action", response_model=ActionRecommendationResponse, tags=["phase_5"])
+async def get_next_action(request: ActionRecommendationRequest):
+    """Get next recommended action for goal (Phase 5)"""
+    try:
+        from autonomous_engine import get_autonomous_engine
+        
+        engine = get_autonomous_engine()
+        action = engine.get_recommended_action(request.goal_id)
+        
+        if action:
+            return ActionRecommendationResponse(
+                action=action,
+                message="Next action ready. User approval required."
+            )
+        else:
+            return ActionRecommendationResponse(
+                action=None,
+                message="All actions completed or goal not found"
+            )
+    except Exception as e:
+        logger.error(f"Action recommendation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =========================
