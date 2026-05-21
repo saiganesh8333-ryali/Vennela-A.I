@@ -95,6 +95,14 @@ class IntentResponse(BaseModel):
     all_intents: Dict[str, float]
 
 
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatResponse(BaseModel):
+    response: str
+
+
 # =========================
 # ROUTES
 # =========================
@@ -225,6 +233,15 @@ async def process_text(request: Dict[str, Any]):
         logger.error(f"Process error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+
+    return ChatResponse(
+        response=f"You said: {request.message}"
+    )
 
 @app.get("/status", tags=["health"])
 async def status():
