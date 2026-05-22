@@ -236,12 +236,31 @@ async def process_text(request: Dict[str, Any]):
 
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(request: ChatRequest):
+    """Chat with Gemini AI."""
+    try:
+        import google.generativeai as genai
 
-    return ChatResponse(
-        response=f"You said: {request.message}"
-    )
+        api_key = os.getenv("GEMINI_API_KEY")
+
+        if not api_key:
+            raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        ai_response = model.generate_content(request.message)
+
+        return ChatResponse(
+            response=ai_response.text
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/status", tags=["health"])
 async def status():
