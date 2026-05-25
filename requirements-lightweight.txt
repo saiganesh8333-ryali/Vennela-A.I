@@ -11,9 +11,6 @@ gunicorn==23.0.0
 firebase-admin==6.5.0
 google-cloud-firestore==2.16.0
 
-# Core data processing (lightweight, no torch/transformers/sklearn)
-numpy==1.26.4
-
 # Environment config
 python-dotenv==1.0.1
 
@@ -26,9 +23,10 @@ google-generativeai==0.5.4
 # NOTE: These are now replaced by lightweight modules:
 # - sentence-transformers (200MB) -> lightweight_embeddings.py (7.5KB)
 # - transformers (500MB) -> lightweight_nlp.py (8KB)
-# - torch (500MB) -> numpy
+# - torch (500MB) -> removed (not needed)
 # - scikit-learn (100MB) -> lightweight_ml.py (7KB)
+# - numpy (removed - not used in simple chat)
 
 # Total before: ~1.3GB of ML libraries
-# Total after: ~30MB base + lightweight modules (~23KB)
-# Python: 3.11 for stability (avoid 3.14 SDK incompatibility)
+# Total after: ~25MB base + lightweight modules (~23KB)
+# Python: 3.11 for stability (no prebuilt wheels in 3.14 for numpy)
