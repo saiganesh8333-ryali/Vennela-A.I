@@ -1,21 +1,23 @@
-# Web framework
-fastapi==0.116.1
-uvicorn[standard]==0.35.0
-gunicorn
+# Web framework (stable, Python 3.11 compatible)
+fastapi==0.115.0
+uvicorn==0.30.6
+gunicorn==23.0.0
 
-# Firebase
-firebase-admin
-google-cloud-firestore
-google-api-core
+# Firebase with locked stable versions (Python 3.11 compatible)
+firebase-admin==6.5.0
+google-cloud-firestore==2.16.0
 
 # Core data processing (lightweight alternatives to torch/transformers/sklearn)
-numpy
+numpy==1.26.4
 
 # Environment config
-python-dotenv
+python-dotenv==1.0.1
 
-# LLM API
-google-generativeai
+# HTTP utilities
+requests==2.32.3
+
+# LLM API (stable version, Python 3.11 compatible)
+google-generativeai==0.5.4
 
 # NOTE: Heavy ML libraries replaced with lightweight Python modules:
 # - sentence-transformers (200MB) -> lightweight_embeddings.py
@@ -23,3 +25,6 @@ google-generativeai
 # - torch (500MB) -> numpy
 # - scikit-learn (100MB) -> lightweight_ml.py
 # This reduces deployment size from 1.3GB to ~30MB
+#
+# Python 3.11 used for compatibility. Avoid 3.14 (unstable Google SDK support).
+# All versions locked to prevent dependency resolver conflicts.
