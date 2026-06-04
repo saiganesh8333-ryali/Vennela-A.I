@@ -43,10 +43,12 @@ class MultiLLMRouter:
         self.routing_history = []
         self.max_history = 500
         self._gemini_client = None
-        self._initialize_gemini()
     
-    def _initialize_gemini(self) -> None:
-        """Initialize Gemini client."""
+    def _ensure_gemini_initialized(self) -> None:
+        """Lazily initialize Gemini client when needed."""
+        if self._gemini_client is not None:
+            return
+
         try:
             import google.generativeai as genai
             api_key = os.getenv("GEMINI_API_KEY")
@@ -275,6 +277,7 @@ class MultiLLMRouter:
         model_name: str
     ) -> Dict[str, Any]:
         """Call Gemini API."""
+        self._ensure_gemini_initialized()
         if not self._gemini_client:
             return {
                 "success": False,
@@ -285,6 +288,7 @@ class MultiLLMRouter:
         start = time.time()
         
         try:
+
             # Prepare conversation
             conversation = []
             if messages:

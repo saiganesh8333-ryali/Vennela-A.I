@@ -1,7 +1,8 @@
 # Web framework
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
-gunicorn
+gunicorn==23.0.0
+pydantic==2.5.3
 
 # Firebase
 firebase-admin
@@ -15,7 +16,9 @@ numpy
 python-dotenv
 
 # LLM API
-google-generativeai
+google-generativeai==0.7.2
+protobuf==4.25.3
+grpcio==1.60.0
 
 # NOTE: Heavy ML libraries replaced with lightweight Python modules:
 # - sentence-transformers (200MB) -> lightweight_embeddings.py

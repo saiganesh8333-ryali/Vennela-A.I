@@ -1,7 +1,8 @@
 # Web framework (stable, Python 3.11 compatible)
-fastapi==0.115.0
-uvicorn==0.30.6
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
 gunicorn==23.0.0
+pydantic==2.5.3
 
 # Firebase with locked stable versions (Python 3.11 compatible)
 firebase-admin==6.5.0
@@ -14,7 +15,9 @@ python-dotenv==1.0.1
 requests==2.32.3
 
 # LLM API (stable version, Python 3.11 compatible)
-google-generativeai==0.5.4
+google-generativeai==0.7.2
+protobuf==4.25.3
+grpcio==1.60.0
 
 # NOTE: Heavy ML libraries replaced with lightweight Python modules:
 # - sentence-transformers (200MB) -> lightweight_embeddings.py

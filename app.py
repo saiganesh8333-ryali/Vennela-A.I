@@ -410,6 +410,8 @@ async def startup_event():
     """Run on startup."""
     logger.info("Vennela AI starting up...")
     logger.info(f"Lightweight mode: {LIGHTWEIGHT_MODE}")
+    logger.info(f"Python runtime: {sys.version.split()[0]}")
+    print("SERVER STARTED OK")
 
 
 @app.on_event("shutdown")
