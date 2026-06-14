@@ -1,5 +1,4 @@
-ÿþ# Web framework (stable, Python 3.11 compatible)
-setuptools==70.0.0
+ï»¿# Web framework (stable, Python 3.11 compatible)
 fastapi==0.116.1
 uvicorn[standard]==0.35.0
 gunicorn==23.0.0
@@ -18,15 +17,15 @@ requests==2.32.3
 # LLM API (stable version, Python 3.11 compatible)
 google-generativeai==0.7.2
 protobuf==4.25.3
-grpcio==1.59.0
+grpcio==1.60.0
 
 # NOTE: Heavy ML libraries replaced with lightweight Python modules:
-# - sentence-transformers (200MB-> lightweight_embeddings.py
+# - sentence-transformers (200MB) -> lightweight_embeddings.py
 # - transformers (500MB) -> lightweight_nlp.py
-# - torch (500MB-> removed (not needed for chat)
+# - torch (500MB) -> removed (not needed for chat)
 # - scikit-learn (100MB) -> lightweight_ml.py
 # - numpy (removed - not used in simple chat endpoint)
 # This reduces deployment size from 1.3GB to ~25MB
 #
 # Python 3.11 used for compatibility. Avoid 3.14 (no prebuilt numpy wheels).
-# All versions locked to prevent dependency resolver conflicts.
+# All versions locked to prevent dependency resolver conflicts.
