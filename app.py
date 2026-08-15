@@ -248,7 +248,23 @@ async def chat(request: ChatRequest):
             raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-3.5-flash")
+
+        # Read personality from environment (keep existing prompts unchanged)
+        VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
+        # Read existing prompts if provided via environment (do not modify them)
+        VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", "")
+        SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
+
+        # Prefer VENNELA_PROMPT if present, otherwise SYSTEM_PROMPT
+        base_system = VENNELA_PROMPT or SYSTEM_PROMPT or ""
+
+        # Combine base system instruction with personality (if any)
+        combined_system_instruction = "\n\n".join([s for s in (base_system, VENNELA_PERSONALITY) if s])
+
+        model = genai.GenerativeModel(
+            "gemini-3.5-flash",
+            system_instruction=combined_system_instruction
+        )
 
         ai_response = model.generate_content(request.message)
 
