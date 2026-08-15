@@ -248,7 +248,7 @@ async def chat(request: ChatRequest):
             raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-3.5-flash")
 
         ai_response = model.generate_content(request.message)
 
