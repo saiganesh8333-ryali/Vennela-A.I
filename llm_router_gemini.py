@@ -286,38 +286,46 @@ class MultiLLMRouter:
             }
         
         start = time.time()
-        
-        try:
 
-            # Prepare conversation
-            conversation = []
-            if messages:
-                for msg in messages[-5:]:  # Last 5 messages for context
-                    conversation.append(msg)
-            conversation.append({"role": "user", "content": query})
-            
-            # Call Gemini
-            model = self._gemini_client.GenerativeModel(model_name)
-            response = model.generate_content(
-                [msg.get("content", "") for msg in conversation]
-            )
-            
+        # Prepare conversation
+        conversation = []
+        if messages:
+            for msg in messages[-5:]:  # Last 5 messages for context
+                conversation.append(msg)
+        conversation.append({"role": "user", "content": query})
+        
+        # Use centralized gemini fallback caller
+        from gemini_config import get_gemini_model_chain
+        from gemini_fallback import call_gemini_with_fallback, GeminiFallbackError
+
+        model_chain = get_gemini_model_chain()
+
+        # Preferred model_name should be tried first if provided
+        try:
+            response = call_gemini_with_fallback(
+                self._gemini_client,
+                [msg.get("content", "") for msg in conversation],
+                system_instruction="",
+
+                    model_chain=model_chain,
+                    preferred_first=model_name,
+                    max_retries=int(os.getenv("GEMINI_MAX_RETRIES", "2")),
+                    backoff_base=float(os.getenv("GEMINI_BACKOFF_BASE", "0.5")),
+                )
+
             latency_ms = int((time.time() - start) * 1000)
-            
-            # Extract response
-            ai_response = response.text if response else ""
-            
+            ai_response = getattr(response, 'text', None) or str(response)
+
             if not ai_response:
                 return {
                     "success": False,
                     "error": "Empty response from Gemini",
                     "provider": provider_type.value
                 }
-            
-            # Estimate tokens
+
             tokens_used = len(query.split()) * 1.3
             cost = self._estimate_cost(provider_type, int(tokens_used))
-            
+
             result = {
                 "success": True,
                 "provider": provider_type.value,
@@ -327,7 +335,7 @@ class MultiLLMRouter:
                 "cost": cost,
                 "latency_ms": latency_ms
             }
-            
+
             self.provider_manager.record_success(
                 provider_type.value,
                 ProviderResponse(
@@ -340,14 +348,18 @@ class MultiLLMRouter:
                     timestamp=time.time()
                 )
             )
-            
-            logger.info(
-                f"✅ Gemini ({model_name}): {latency_ms}ms, "
-                f"{int(tokens_used)} tokens"
-            )
-            
+
+            logger.info(f"✅ Gemini ({model_name}): {latency_ms}ms, {int(tokens_used)} tokens")
             return result
-            
+
+        except GeminiFallbackError as gf:
+            logger.error(f"Gemini all models failed: {gf}")
+            self.provider_manager.record_error(provider_type.value, str(gf))
+            return {
+                "success": False,
+                "error": "All Gemini models failed",
+                "provider": provider_type.value
+            }
         except Exception as e:
             logger.error(f"Gemini call failed: {e}")
             self.provider_manager.record_error(provider_type.value, str(e))

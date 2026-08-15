@@ -241,6 +241,7 @@ async def chat(request: ChatRequest):
     """Chat with Gemini AI."""
     try:
         import google.generativeai as genai
+        import time as _time
 
         api_key = os.getenv("GEMINI_API_KEY")
 
@@ -261,22 +262,60 @@ async def chat(request: ChatRequest):
         # Combine base system instruction with personality (if any)
         combined_system_instruction = "\n\n".join([s for s in (base_system, VENNELA_PERSONALITY) if s])
 
-        model = genai.GenerativeModel(
-            "gemini-3.5-flash",
-            system_instruction=combined_system_instruction
-        )
+        # Centralized model chain obtained from gemini_config (env override supported)
+        try:
+            from gemini_config import get_gemini_model_chain
+            model_chain = get_gemini_model_chain()
+        except Exception:
+            # Fallback to single-model chain using the currently configured primary model
+            model_chain = ["gemini-3.5-flash"]
+            logger.warning("[Gemini] Could not load centralized GEMINI_MODEL_CHAIN; using default single primary model")
 
-        ai_response = model.generate_content(request.message)
+        # Use centralized fallback helper
+        from gemini_fallback import call_gemini_with_fallback, GeminiFallbackError
 
-        return ChatResponse(
-            response=ai_response.text
-        )
+        GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "2"))
+        GEMINI_BACKOFF_BASE = float(os.getenv("GEMINI_BACKOFF_BASE", "0.5"))
+
+        try:
+            response = call_gemini_with_fallback(
+                genai,
+                request.message,
+                system_instruction=combined_system_instruction,
+                model_chain=model_chain,
+                preferred_first=None,
+                max_retries=GEMINI_MAX_RETRIES,
+                backoff_base=GEMINI_BACKOFF_BASE,
+            )
+
+            # response is the SDK response object; return text if present
+            text = getattr(response, 'text', None)
+            if text is None:
+                # Some SDK variants put content differently
+                text = str(response)
+
+            return ChatResponse(response=text)
+
+        except HTTPException:
+            raise
+        except GeminiFallbackError as gf:
+            logger.error(f"[Gemini] All configured models failed: {gf}")
+            raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
+        except Exception as e:
+            # Permanent errors will surface here; map to clean client-facing errors
+            logger.error(f"Chat error: {e}")
+            status = getattr(e, 'status_code', None) or getattr(e, 'code', None) or None
+            if status == 401:
+                raise HTTPException(status_code=401, detail="Gemini authentication failed")
+            # Generic internal error
+            raise HTTPException(status_code=500, detail="Internal AI error")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Do not include provider raw error text in HTTP response
+        raise HTTPException(status_code=500, detail="Internal AI error")
 
 @app.get("/status", tags=["health"])
 async def status():
