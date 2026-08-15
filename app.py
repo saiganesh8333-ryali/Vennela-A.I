@@ -305,7 +305,9 @@ async def chat(request: ChatRequest):
             # Permanent errors will surface here; map to clean client-facing errors
             logger.error(f"Chat error: {e}")
             status = getattr(e, 'status_code', None) or getattr(e, 'code', None) or None
-            if status == 401:
+            # Map explicit authentication/invalid-key messages to 401 so callers see auth failure
+            msg = str(e).lower() if e is not None else ''
+            if status == 401 or any(token in msg for token in ("invalid api key", "invalidapikey", "unauthorized", "authentication", "invalid api", "invalid auth")):
                 raise HTTPException(status_code=401, detail="Gemini authentication failed")
             # Generic internal error
             raise HTTPException(status_code=500, detail="Internal AI error")
