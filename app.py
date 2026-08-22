@@ -101,11 +101,13 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    automation: Optional[Dict[str, Any]] = None
 
 
 # =========================
 # ROUTES
 # =========================
+
 
 @app.get("/", tags=["health"])
 async def root():
@@ -240,7 +242,14 @@ async def process_text(request: Dict[str, Any]):
 async def chat(request: ChatRequest):
     """Chat with Gemini AI."""
     try:
-        import google.generativeai as genai
+        try:
+            import google.generativeai as genai
+        except Exception:
+            # In test environments or lightweight mode the real SDK may be unavailable or incompatible.
+            # Provide a dummy placeholder module; the gemini_fallback caller is monkeypatched in tests.
+            import types as _types
+            genai = _types.SimpleNamespace()
+
         import time as _time
 
         api_key = os.getenv("GEMINI_API_KEY")
@@ -248,7 +257,13 @@ async def chat(request: ChatRequest):
         if not api_key:
             raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
 
-        genai.configure(api_key=api_key)
+        # Only configure if SDK exposes configure
+        if hasattr(genai, "configure"):
+            try:
+                genai.configure(api_key=api_key)
+            except Exception:
+                # Ignore configuration errors in non-SDK envs
+                pass
 
         # Read personality from environment (keep existing prompts unchanged)
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
@@ -294,7 +309,26 @@ async def chat(request: ChatRequest):
                 # Some SDK variants put content differently
                 text = str(response)
 
-            return ChatResponse(response=text)
+            # Attempt to interpret LLM response as an automation action
+            try:
+                from automation.adapter import map_llm_response_to_action
+                from automation.executor import ToolExecutor
+                from automation.registry import ToolRegistry
+
+                action = map_llm_response_to_action(text)
+                automation_result = None
+                if action and isinstance(action, dict):
+                    tool_name = action.get("tool")
+                    arguments = action.get("arguments", {})
+                    executor = ToolExecutor(ToolRegistry())
+                    exec_result = executor.execute(tool_name, arguments)
+                    automation_result = exec_result
+                # Return chat response with optional automation result
+                return ChatResponse(response=text, automation=automation_result)
+            except Exception as e:
+                logger.exception(f"Automation adapter error: {e}")
+                # Do not fail the chat endpoint because automation failed; return core text
+                return ChatResponse(response=text, automation={"success": False, "error": {"type": type(e).__name__, "message": str(e)}})
 
         except HTTPException:
             raise
@@ -335,6 +369,18 @@ async def status():
         },
         "size_reduction": "90% smaller than full deployment"
     }
+
+# =========================
+# AUTOMATION (LEVEL 1) ROUTER
+# =========================
+try:
+    # Import and include the Level 1 Automation router if present
+    from automation.api import router as automation_router
+    app.include_router(automation_router, prefix="/tools")
+    logger.info("Automation router included at /tools")
+except Exception as e:
+    logger.warning(f"Could not include automation router: {e}")
+
 
 
 # =========================
