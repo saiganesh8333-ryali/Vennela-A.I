@@ -146,10 +146,31 @@ def initialize_firebase() -> bool:
         return False
 
 
-def get_db() -> Optional[firestore.Client]:
-    """Get Firestore client, initializing Firebase if needed."""
+def get_db() -> Optional[object]:
+    """Get the configured database client.
+
+    This function acts as a compatibility shim. By default it returns a Firestore
+    client (initializing Firebase if necessary). If MEMORY_BACKEND is set to
+    'supabase', it will return a Supabase/Postgres-backed client implemented by
+    memory.adapter.supabase_adapter.get_db(). The returned client intends to
+    provide a minimal collection(...).document(...).get()/set() surface used by
+    the memory code.
+    """
     global db
 
+    backend = os.getenv("MEMORY_BACKEND", "firebase").lower()
+    if backend == "supabase":
+        try:
+            # lazy import to avoid adding a hard runtime dependency on psycopg2
+            from memory.adapter.supabase_adapter import get_db as _get_supabase_db
+            supa = _get_supabase_db()
+            if supa:
+                return supa
+        except Exception as e:
+            logger.warning("Supabase adapter initialization failed: %s", e)
+            # fall through to firebase fallback
+
+    # default firebase behavior
     if db is None and not initialize_firebase():
         return None
 

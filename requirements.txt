@@ -30,3 +30,6 @@ openai==2.36.0
 #
 # Python 3.11 used for compatibility. Avoid 3.14 (no prebuilt numpy wheels).
 # All versions locked to prevent dependency resolver conflicts.
+
+# PostgreSQL driver for Supabase/Postgres adapter (synchronous)
+psycopg2-binary==2.9.12
