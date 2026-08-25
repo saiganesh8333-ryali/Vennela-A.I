@@ -1,6 +1,6 @@
 """Smoke tests for the no-model lightweight NLP path."""
-from embedding_engine import get_cache_stats, get_embedding
-from nlp_engine import detect_emotion, detect_intent, detect_sentiment, get_rule_based_reply
+from memory.embedding_engine import get_cache_stats, get_embedding
+from ai.nlp_engine import detect_emotion, detect_intent, detect_sentiment, get_rule_based_reply
 
 
 def test_intent_detection():

@@ -2,7 +2,7 @@
 import logging
 from typing import Optional, List
 
-from embedding_engine import get_embedding
+from .embedding_engine import get_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def retrieve_memory(
             return None
         
         best_text = None
-        best_score = 0
+        best_score = -1.0
         
         for item in embeddings:
             if not isinstance(item, dict) or "vector" not in item:

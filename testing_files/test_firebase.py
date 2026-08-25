@@ -2,9 +2,13 @@
 """Quick Firebase connection test."""
 import sys
 
+import pytest
 from dotenv import load_dotenv
 
-from firebase_db import get_db, initialize_firebase
+try:
+    from firebase.firebase_db import get_db, initialize_firebase
+except Exception as exc:  # pragma: no cover - environment-specific dependency issue
+    pytest.skip(f"Firebase dependencies are not available in this environment: {exc}", allow_module_level=True)
 
 
 def main() -> int:
