@@ -45,6 +45,23 @@ def _default_memory() -> Dict:
 # NORMALIZE MEMORY
 # =========================
 
+def _normalize_long_term_entry(item) -> Dict:
+    """Normalize plain strings and dict payloads into the canonical long_term format."""
+    if isinstance(item, dict):
+        normalized = dict(item)
+        text_value = normalized.get("text") or normalized.get("content") or normalized.get("event") or normalized.get("message") or ""
+        normalized["text"] = str(text_value)
+        normalized.setdefault("timestamp", None)
+        normalized.setdefault("importance", 0.0)
+        return normalized
+
+    return {
+        "text": str(item),
+        "timestamp": None,
+        "importance": 0.0,
+    }
+
+
 def _normalize_memory(data: Optional[Dict]) -> Dict:
 
     if not data or not isinstance(data, dict):
@@ -54,7 +71,20 @@ def _normalize_memory(data: Optional[Dict]) -> Dict:
 
     memory["profile"] = data.get("profile", {})
     memory["short_term"] = data.get("short_term", [])
-    memory["long_term"] = data.get("long_term", [])
+
+    normalized_long_term = []
+    seen_texts = set()
+    for item in data.get("long_term") or []:
+        entry = _normalize_long_term_entry(item)
+        text_value = entry.get("text", "")
+        if not text_value:
+            continue
+        if text_value in seen_texts:
+            continue
+        seen_texts.add(text_value)
+        normalized_long_term.append(entry)
+    memory["long_term"] = normalized_long_term
+
     memory["episodic"] = data.get("episodic", [])
     memory["emotions"] = data.get("emotions", {})
     memory["sentiments"] = data.get("sentiments", {})
@@ -329,11 +359,19 @@ def update_memory(
 
         elif should_store:
 
-            if compressed not in memory["long_term"]:
+            canonical_entry = {
+                "text": compressed,
+                "timestamp": datetime.utcnow().isoformat(),
+                "importance": float(score)
+            }
 
-                memory["long_term"].append(
-                    compressed
-                )
+            existing_texts = {
+                item.get("text") if isinstance(item, dict) else str(item)
+                for item in memory["long_term"]
+            }
+
+            if compressed not in existing_texts:
+                memory["long_term"].append(canonical_entry)
 
         # =====================
         # SHORT TERM

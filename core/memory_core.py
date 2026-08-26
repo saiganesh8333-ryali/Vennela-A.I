@@ -69,7 +69,7 @@ def extract_topic_from_message(user_message: str) -> str:
             if keyword in text_lower:
                 return topic
     
-    return "general"
+    return None
 
 
 def process_memory(
@@ -107,10 +107,11 @@ def process_memory(
         # STEP 5: PATTERN DETECTION (Phase 2)
         if extract_patterns:
             detector = get_pattern_detector()
+            subject_tags = [topic] if topic else []
             detector.process_conversation(
                 user_message,
                 ai_response="",  # Will be filled by caller
-                subject_tags=[topic],
+                subject_tags=subject_tags,
                 timestamp=time.time()
             )
         
@@ -125,9 +126,9 @@ def process_memory(
             "importance": score,
             "should_store": should_store,
             "importance_category": (
-                "critical" if score >= 0.8 else
-                "high" if score >= 0.6 else
-                "medium" if score >= 0.4 else
+                "critical" if score >= 0.7 else
+                "high" if score >= 0.5 else
+                "medium" if score >= 0.3 else
                 "low"
             )
         }

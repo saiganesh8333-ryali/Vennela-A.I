@@ -12,7 +12,7 @@ IMPORTANT: Run this ONCE before redeploying!
 
 import logging
 import sys
-from firebase_db import initialize_firebase, get_db
+from firebase.firebase_db import initialize_firebase, get_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

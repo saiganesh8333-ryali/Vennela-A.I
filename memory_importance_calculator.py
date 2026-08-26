@@ -112,6 +112,9 @@ class RepetitionScorer:
         4-5 mentions: 0.6
         6+ mentions: 1.0
         """
+        if not topic or topic == "general":
+            return 0.0
+
         count = self.mention_counts.get(topic, 0)
         
         if count == 0:
@@ -216,17 +219,17 @@ class MemoryImportanceCalculator:
         emotional = self.emotional_scorer.score_emotional_weight(text)
         
         # Repetition (if topic provided)
-        if topic:
+        if topic and topic != "general":
             self.repetition_scorer.add_mention(topic, weight=1.0)
             repetition = self.repetition_scorer.get_repetition_score(topic)
         else:
-            repetition = 0.2  # Neutral baseline
-        
+            repetition = 0.0  # No topic means no repetition boost
+
         # Recency (if timestamp provided)
         if timestamp:
             recency = self.recency_scorer.score_recency(timestamp)
         else:
-            recency = 1.0  # Assume recent if not specified
+            recency = 1.0  # Assume recent if not otherwise specified
         
         # Calculate weighted importance
         importance = (
