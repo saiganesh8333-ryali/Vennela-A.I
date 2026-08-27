@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from memory.embedding_engine import get_embedding
-from firebase.firebase_db import get_db
+from memory import storage_adapter
 from ai.nlp_engine import detect_emotion, detect_sentiment
 from core.memory_core import process_memory, importance_score
 
@@ -99,54 +99,11 @@ def _normalize_memory(data: Optional[Dict]) -> Dict:
 # =========================
 
 def get_memory(user_id: str) -> Dict:
-
-    try:
-
-        db = get_db()
-
-        if not db:
-            return _default_memory()
-
-        doc = (
-            db.collection("memory")
-            .document(user_id)
-            .get()
-        )
-
-        if doc.exists:
-            return _normalize_memory(doc.to_dict())
-
-        return _default_memory()
-
-    except Exception as e:
-
-        logger.error(f"Memory load error: {e}")
-
-        return _default_memory()
+    return _normalize_memory(storage_adapter.load_memory(user_id))
 
 
 def save_memory(user_id: str, data: Dict) -> bool:
-
-    try:
-
-        db = get_db()
-
-        if not db:
-            return False
-
-        (
-            db.collection("memory")
-            .document(user_id)
-            .set(data, merge=True)
-        )
-
-        return True
-
-    except Exception as e:
-
-        logger.error(f"Memory save error: {e}")
-
-        return False
+    return storage_adapter.save_memory(user_id, _normalize_memory(data))
 
 # =========================
 # IMPORTANCE SCORE
