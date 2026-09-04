@@ -31,6 +31,54 @@ if LIGHTWEIGHT_MODE:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _basic_memory_context():
+    """Build the single trusted Boss context from server configuration only."""
+    from memory import AuthContext
+
+    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip()
+    if not boss_id:
+        raise RuntimeError("VENNELA_BOSS_ID is required for memory access")
+    return AuthContext(user_id=boss_id, authenticated=True, session_id=None)
+
+
+def _basic_memory_api():
+    """Construct the production Basic Memory API lazily."""
+    from supabase import create_client
+    from memory import MemoryAPI, SupabaseMemoryRepository
+
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_KEY", "").strip()
+    if not url or not key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required for memory access")
+    return MemoryAPI(SupabaseMemoryRepository(create_client(url, key)))
+
+
+def _memory_category(message: str):
+    lower = message.lower()
+    if "my name is" in lower or "call me" in lower:
+        return "Profile"
+    if "goal" in lower or "i want" in lower:
+        return "Goal"
+    if "project" in lower:
+        return "Project"
+    if "skill" in lower or "i can " in lower:
+        return "Skill"
+    if "i like" in lower or "i love" in lower or "favorite" in lower or "prefer" in lower:
+        return "Preference"
+    if "interested" in lower:
+        return "Interest"
+    return "Fact"
+
+
+def _is_memory_eligible(message: str) -> bool:
+    lower = message.lower()
+    return any(marker in lower for marker in (
+        "remember", "my name is", "call me", "favorite", "i like", "i love",
+        "prefer", "my goal", "i want", "my project", "my skill", "i can ",
+        "interested in",
+    ))
+
 # =========================
 # FASTAPI APP
 # =========================
@@ -252,28 +300,24 @@ async def chat(request: ChatRequest, http_request: Request):
 
         genai.configure(api_key=api_key)
 
-        # Load durable memory when the client supplies a stable identity.
-        memory = {}
-        memory_identity = (request.user_id or request.session_id or
-                           http_request.headers.get("x-user-id") or
-                           http_request.headers.get("x-session-id"))
-        if memory_identity:
-            try:
-                from memory.smart_memory import get_memory
-                memory = get_memory(memory_identity)
-            except Exception as memory_error:
-                logger.warning("Memory load unavailable for %s: %s", memory_identity, memory_error)
+        # Memory is always scoped to the server-configured Boss identity.
+        memory_api = None
+        memory_context = None
+        try:
+            memory_context = _basic_memory_context()
+            memory_api = _basic_memory_api()
+            memories = memory_api.retrieve(
+                memory_context, domain="boss_personal", query=request.message, limit=5
+            )
+        except Exception as memory_error:
+            memories = []
+            logger.warning("Basic memory load unavailable: %s", memory_error)
 
         retrieved_context = ""
-        if memory_identity and memory:
-            try:
-                from memory.retrieval import retrieve_memories
-                retrieved = retrieve_memories(memory, request.message, threshold=0.1, top_k=5)
-                retrieved_context = "\n".join(
-                    f"- {item['text']}" for item in retrieved if item.get("text")
-                )
-            except Exception as retrieval_error:
-                logger.warning("Memory retrieval unavailable for %s: %s", memory_identity, retrieval_error)
+        if memories:
+            retrieved_context = "\n".join(
+                f"- {item.content}" for item in memories if item.content
+            )
 
         # Read personality from environment (keep existing prompts unchanged)
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
@@ -325,18 +369,16 @@ async def chat(request: ChatRequest, http_request: Request):
                 # Some SDK variants put content differently
                 text = str(response)
 
-            if memory_identity:
+            if memory_api is not None and memory_context is not None and _is_memory_eligible(request.message):
                 try:
-                    from memory.smart_memory import save_memory, update_memory
-                    updated_memory = update_memory(
-                        memory_identity,
+                    memory_api.store(
+                        memory_context,
                         request.message,
-                        text,
-                        memory,
+                        _memory_category(request.message),
+                        domain="boss_personal",
                     )
-                    save_memory(memory_identity, updated_memory)
                 except Exception as memory_error:
-                    logger.warning("Memory update unavailable for %s: %s", memory_identity, memory_error)
+                    logger.warning("Basic memory store unavailable: %s", memory_error)
 
             return ChatResponse(response=text)
 

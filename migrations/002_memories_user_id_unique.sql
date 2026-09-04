@@ -1,2 +1,2 @@
--- Ensure one canonical memory snapshot per user for safe upserts.
-create unique index if not exists memories_user_id_unique on memories (user_id);
+-- The Basic Memory Layer stores many records per owner; memory_id is the key.
+drop index if exists memories_user_id_unique;
