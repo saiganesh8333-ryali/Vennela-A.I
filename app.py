@@ -370,15 +370,14 @@ async def chat(request: ChatRequest, http_request: Request):
                 text = str(response)
 
             if memory_api is not None and memory_context is not None and _is_memory_eligible(request.message):
-                try:
-                    memory_api.store(
-                        memory_context,
-                        request.message,
-                        _memory_category(request.message),
-                        domain="boss_personal",
-                    )
-                except Exception as memory_error:
-                    logger.warning("Basic memory store unavailable: %s", memory_error)
+                stored_memory = memory_api.store(
+                    memory_context,
+                    request.message,
+                    _memory_category(request.message),
+                    domain="boss_personal",
+                )
+                if not stored_memory:
+                    raise RuntimeError("Basic memory store returned no saved record")
 
             return ChatResponse(response=text)
 
