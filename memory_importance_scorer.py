@@ -1,7 +1,7 @@
 """Memory Intelligence - Phase 4 importance scorer."""
 
 import logging
-from typing import Dict
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 

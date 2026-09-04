@@ -1,6 +1,8 @@
 import re
 
 def classify_memory(text: str):
+    if not isinstance(text, str) or not text.strip():
+        return "general"
 
     text_lower = text.lower()
 

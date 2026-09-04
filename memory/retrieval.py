@@ -1,6 +1,6 @@
 """Memory retrieval engine using semantic similarity."""
 import logging
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 
 from .embedding_engine import get_embedding
 
@@ -54,40 +54,88 @@ def retrieve_memory(
         return None
     
     try:
+        results = retrieve_memories(memory, query, threshold=threshold, top_k=top_k)
+        return results[0]["text"] if results else None
+    except Exception as e:
+        logger.error(f"Error retrieving memory: {e}")
+        return None
+
+
+def retrieve_memories(
+    memory: Dict[str, Any],
+    query: str,
+    threshold: float = 0.15,
+    top_k: int = 5,
+) -> List[Dict[str, Any]]:
+    """Return structured memories ranked by relevance, importance, and recency."""
+    if not isinstance(memory, dict) or not isinstance(query, str) or not query.strip():
+        return []
+    try:
         embeddings = memory.get("embeddings", [])
+        if not isinstance(embeddings, list):
+            embeddings = []
         if not embeddings:
-            logger.debug("No embeddings found in memory")
-            return None
+            embeddings = [
+                item for field in ("long_term", "episodic", "short_term")
+                for item in (memory.get(field, []) if isinstance(memory.get(field, []), list) else [])
+            ]
         
         query_vector = get_embedding(query)
         if not query_vector:
             logger.warning("Failed to generate query embedding")
-            return None
-        
-        best_text = None
-        best_score = -1.0
-        
+            query_vector = []
+
+        candidates = []
         for item in embeddings:
-            if not isinstance(item, dict) or "vector" not in item:
+            if isinstance(item, dict):
+                vector = item.get("vector", [])
+                text = item.get("text") or item.get("content") or item.get("event")
+            elif isinstance(item, str):
+                vector, text = [], item
+            else:
                 continue
-            
-            vector = item.get("vector", [])
-            if not vector:
+            if not isinstance(text, str) or not text.strip():
                 continue
-            
-            score = cosine_similarity(query_vector, vector)
-            
-            if score > best_score:
-                best_score = score
-                best_text = item.get("text")
-        
-        if best_score < threshold:
-            logger.debug(f"Best similarity score {best_score} below threshold {threshold}")
-            return None
-        
-        logger.debug(f"Retrieved memory with similarity {best_score:.3f}: {best_text[:50]}...")
-        return best_text
-        
+            semantic = (
+                cosine_similarity(query_vector, vector)
+                if query_vector and isinstance(vector, list) and len(vector) == len(query_vector)
+                else _token_similarity(text, query)
+            )
+            if semantic < threshold:
+                continue
+            metadata = item if isinstance(item, dict) else {"text": text}
+            importance = _number(metadata.get("importance", metadata.get("importance_score", 0.0)))
+            recency = _recency(metadata.get("timestamp"))
+            candidates.append({
+                "text": text,
+                "similarity": semantic,
+                "importance": importance,
+                "retrieval_score": semantic * 0.55 + importance * 0.3 + recency * 0.15,
+                "metadata": metadata,
+            })
+        candidates.sort(key=lambda result: result["retrieval_score"], reverse=True)
+        return candidates[:max(0, top_k)]
     except Exception as e:
         logger.error(f"Error retrieving memory: {e}")
-        return None
+        return []
+
+
+def _number(value: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _token_similarity(left: str, right: str) -> float:
+    left_words, right_words = set(left.lower().split()), set(right.lower().split())
+    union = left_words | right_words
+    return len(left_words & right_words) / len(union) if union else 0.0
+
+
+def _recency(timestamp: Any) -> float:
+    import time
+    if isinstance(timestamp, (int, float)):
+        age_days = max(0.0, (time.time() - timestamp) / 86400)
+        return 1.0 / (1.0 + age_days / 30.0)
+    return 0.5

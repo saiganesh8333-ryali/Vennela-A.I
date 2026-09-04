@@ -1,7 +1,7 @@
 """Memory Intelligence - Phase 4 semantic linker."""
 
 import logging
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
@@ -25,8 +25,6 @@ def find_semantic_clusters(
         return []
     
     try:
-        import numpy as np
-        
         clusters = []
         assigned = set()
         
@@ -34,7 +32,7 @@ def find_semantic_clusters(
             if i in assigned:
                 continue
             
-            if not item_i.get("vector"):
+            if not isinstance(item_i, dict) or not item_i.get("vector"):
                 continue
             
             cluster = [i]
@@ -44,14 +42,18 @@ def find_semantic_clusters(
                 if j <= i or j in assigned:
                     continue
                 
-                if not item_j.get("vector"):
+                if not isinstance(item_j, dict) or not item_j.get("vector"):
                     continue
                 
                 # Calculate cosine similarity
-                vec_i = np.array(item_i["vector"])
-                vec_j = np.array(item_j["vector"])
-                
-                similarity = np.dot(vec_i, vec_j) / (np.linalg.norm(vec_i) * np.linalg.norm(vec_j))
+                vec_i, vec_j = item_i["vector"], item_j["vector"]
+                if not isinstance(vec_i, list) or not isinstance(vec_j, list):
+                    continue
+                norm_i = sum(float(value) ** 2 for value in vec_i) ** 0.5
+                norm_j = sum(float(value) ** 2 for value in vec_j) ** 0.5
+                if not norm_i or not norm_j:
+                    continue
+                similarity = sum(float(a) * float(b) for a, b in zip(vec_i, vec_j)) / (norm_i * norm_j)
                 
                 if similarity >= similarity_threshold:
                     cluster.append(j)
@@ -101,6 +103,13 @@ def extract_knowledge_graph_entities(memory_text: str) -> Set[str]:
         return set()
 
 
+def _memory_text(memory: Any) -> str:
+    if isinstance(memory, dict):
+        value = memory.get("text") or memory.get("content") or memory.get("event") or memory.get("message")
+        return value.strip() if isinstance(value, str) else ""
+    return memory.strip() if isinstance(memory, str) else ""
+
+
 def build_knowledge_graph(user_memories: List[Dict]) -> Dict:
     """
     Build knowledge graph from user memories.
@@ -126,7 +135,7 @@ def build_knowledge_graph(user_memories: List[Dict]) -> Dict:
         
         # Extract entities from each memory
         for i, memory in enumerate(user_memories):
-            text = memory.get("text", memory.get("content", ""))
+            text = _memory_text(memory)
             entities = extract_knowledge_graph_entities(text)
             
             for entity in entities:
@@ -186,13 +195,13 @@ def link_related_memories(
     
     try:
         related = []
-        target_text = memory_item.get("text", memory_item.get("content", "")).lower()
+        target_text = _memory_text(memory_item).lower()
         
         for other_mem in all_memories:
             if other_mem == memory_item:
                 continue
             
-            other_text = other_mem.get("text", other_mem.get("content", "")).lower()
+            other_text = _memory_text(other_mem).lower()
             
             # Simple text similarity
             target_words = set(target_text.split())
@@ -238,6 +247,9 @@ def update_memory_links(user_memory: Dict) -> Dict:
         short_term = user_memory.get("short_term", [])
         long_term = user_memory.get("long_term", [])
         episodic = user_memory.get("episodic", [])
+        short_term = short_term if isinstance(short_term, list) else []
+        long_term = long_term if isinstance(long_term, list) else []
+        episodic = episodic if isinstance(episodic, list) else []
         
         all_memories = short_term + long_term + episodic
         
@@ -247,6 +259,8 @@ def update_memory_links(user_memory: Dict) -> Dict:
         # Add/update semantic links
         semantic_links = []
         for i, mem in enumerate(all_memories):
+            if not isinstance(mem, (dict, str)):
+                continue
             related = link_related_memories(mem, all_memories)
             if related:
                 semantic_links.append({

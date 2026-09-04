@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from memory.embedding_engine import get_embedding
-from firebase.firebase_db import get_db
+from memory import storage_adapter
 from ai.nlp_engine import detect_emotion, detect_sentiment
 from core.memory_core import process_memory, importance_score
 
@@ -45,6 +45,20 @@ def _default_memory() -> Dict:
 # NORMALIZE MEMORY
 # =========================
 
+def _normalize_long_term_entry(item) -> Optional[Dict]:
+    if isinstance(item, dict):
+        entry = dict(item)
+        text = entry.get("text") or entry.get("content") or entry.get("event") or entry.get("message")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        entry["text"] = text.strip()
+        entry.setdefault("timestamp", None)
+        entry.setdefault("importance", 0.0)
+        return entry
+    if isinstance(item, str) and item.strip():
+        return {"text": item.strip(), "timestamp": None, "importance": 0.0}
+    return None
+
 def _normalize_memory(data: Optional[Dict]) -> Dict:
 
     if not data or not isinstance(data, dict):
@@ -52,16 +66,21 @@ def _normalize_memory(data: Optional[Dict]) -> Dict:
 
     memory = _default_memory()
 
-    memory["profile"] = data.get("profile", {})
-    memory["short_term"] = data.get("short_term", [])
-    memory["long_term"] = data.get("long_term", [])
-    memory["episodic"] = data.get("episodic", [])
-    memory["emotions"] = data.get("emotions", {})
-    memory["sentiments"] = data.get("sentiments", {})
-    memory["importance"] = data.get("importance", [])
-    memory["summary"] = data.get("summary", "")
-    memory["embeddings"] = data.get("embeddings", [])
-
+    memory["profile"] = data.get("profile", {}) if isinstance(data.get("profile", {}), dict) else {}
+    memory["short_term"] = data.get("short_term", []) if isinstance(data.get("short_term", []), list) else []
+    memory["long_term"] = []
+    seen = set()
+    for item in data.get("long_term", []) if isinstance(data.get("long_term", []), list) else []:
+        entry = _normalize_long_term_entry(item)
+        if entry and entry["text"] not in seen:
+            seen.add(entry["text"])
+            memory["long_term"].append(entry)
+    memory["episodic"] = data.get("episodic", []) if isinstance(data.get("episodic", []), list) else []
+    memory["emotions"] = data.get("emotions", {}) if isinstance(data.get("emotions", {}), dict) else {}
+    memory["sentiments"] = data.get("sentiments", {}) if isinstance(data.get("sentiments", {}), dict) else {}
+    memory["importance"] = data.get("importance", []) if isinstance(data.get("importance", []), list) else []
+    memory["summary"] = data.get("summary", "") if isinstance(data.get("summary", ""), str) else ""
+    memory["embeddings"] = data.get("embeddings", []) if isinstance(data.get("embeddings", []), list) else []
     return memory
 
 # =========================
@@ -69,54 +88,11 @@ def _normalize_memory(data: Optional[Dict]) -> Dict:
 # =========================
 
 def get_memory(user_id: str) -> Dict:
-
-    try:
-
-        db = get_db()
-
-        if not db:
-            return _default_memory()
-
-        doc = (
-            db.collection("memory")
-            .document(user_id)
-            .get()
-        )
-
-        if doc.exists:
-            return _normalize_memory(doc.to_dict())
-
-        return _default_memory()
-
-    except Exception as e:
-
-        logger.error(f"Memory load error: {e}")
-
-        return _default_memory()
+    return _normalize_memory(storage_adapter.load_memory(user_id))
 
 
 def save_memory(user_id: str, data: Dict) -> bool:
-
-    try:
-
-        db = get_db()
-
-        if not db:
-            return False
-
-        (
-            db.collection("memory")
-            .document(user_id)
-            .set(data, merge=True)
-        )
-
-        return True
-
-    except Exception as e:
-
-        logger.error(f"Memory save error: {e}")
-
-        return False
+    return storage_adapter.save_memory(user_id, _normalize_memory(data))
 
 # =========================
 # IMPORTANCE SCORE
@@ -230,14 +206,15 @@ def summarize_memory(memory: Dict):
         episodic = memory.get("episodic", [])
 
         for event in episodic[-5:]:
-
-            parts.append(
-                f"Event: {event.get('event')}"
-            )
+            if isinstance(event, dict):
+                parts.append(f"Event: {event.get('event', event.get('text', ''))}")
 
         long_term = memory.get("long_term", [])
 
-        parts.extend(long_term[-10:])
+        parts.extend(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in long_term[-10:]
+        )
 
         memory["summary"] = " | ".join(parts[:20])
 
@@ -264,7 +241,9 @@ def update_memory(
 
         memory = _normalize_memory(memory)
 
-        user_msg = user_msg[:MAX_MESSAGE_LENGTH]
+        if not isinstance(user_msg, str) or not user_msg.strip():
+            return memory
+        user_msg = user_msg[:MAX_MESSAGE_LENGTH].strip()
 
         # =====================
         # EMOTION + SENTIMENT
@@ -329,11 +308,25 @@ def update_memory(
 
         elif should_store:
 
-            if compressed not in memory["long_term"]:
-
-                memory["long_term"].append(
-                    compressed
+            existing = next(
+                (
+                    item for item in memory["long_term"]
+                    if (item.get("text") if isinstance(item, dict) else str(item)) == compressed
+                ),
+                None,
+            )
+            if isinstance(existing, dict):
+                existing["reinforced_count"] = int(existing.get("reinforced_count", 1) or 1) + 1
+                existing["importance"] = max(
+                    float(existing.get("importance", 0.0) or 0.0),
+                    float(score),
                 )
+            elif existing is None:
+                memory["long_term"].append({
+                    "text": compressed,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "importance": float(score),
+                })
 
         # =====================
         # SHORT TERM
@@ -373,7 +366,7 @@ def update_memory(
 
             "text": user_msg,
 
-            "vector": embedding,
+            "vector": embedding if isinstance(embedding, list) else [],
 
             "importance": score
         })

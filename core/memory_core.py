@@ -125,7 +125,7 @@ def process_memory(
             "importance": score,
             "should_store": should_store,
             "importance_category": (
-                "critical" if score >= 0.8 else
+                "critical" if score >= 0.7 else
                 "high" if score >= 0.6 else
                 "medium" if score >= 0.4 else
                 "low"
