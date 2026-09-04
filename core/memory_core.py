@@ -116,7 +116,11 @@ def process_memory(
         
         # STEP 6: DECISION
         # Threshold: 0.4 = store (more aggressive than old 4/10 = 0.4)
-        should_store = score >= 0.4
+        explicit_memory = any(
+            marker in user_message.lower()
+            for marker in ("remember", "favorite", "my name is", "call me")
+        )
+        should_store = score >= 0.4 or explicit_memory
         
         memory_data = {
             "type": memory_type,

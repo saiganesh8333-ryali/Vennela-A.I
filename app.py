@@ -7,7 +7,7 @@ This is the main entry point for Render deployment.
 
 import os
 import sys
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -97,6 +97,8 @@ class IntentResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -237,7 +239,7 @@ async def process_text(request: Dict[str, Any]):
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """Chat with Gemini AI."""
     try:
         import google.generativeai as genai
@@ -250,6 +252,29 @@ async def chat(request: ChatRequest):
 
         genai.configure(api_key=api_key)
 
+        # Load durable memory when the client supplies a stable identity.
+        memory = {}
+        memory_identity = (request.user_id or request.session_id or
+                           http_request.headers.get("x-user-id") or
+                           http_request.headers.get("x-session-id"))
+        if memory_identity:
+            try:
+                from memory.smart_memory import get_memory
+                memory = get_memory(memory_identity)
+            except Exception as memory_error:
+                logger.warning("Memory load unavailable for %s: %s", memory_identity, memory_error)
+
+        retrieved_context = ""
+        if memory_identity and memory:
+            try:
+                from memory.retrieval import retrieve_memories
+                retrieved = retrieve_memories(memory, request.message, threshold=0.1, top_k=5)
+                retrieved_context = "\n".join(
+                    f"- {item['text']}" for item in retrieved if item.get("text")
+                )
+            except Exception as retrieval_error:
+                logger.warning("Memory retrieval unavailable for %s: %s", memory_identity, retrieval_error)
+
         # Read personality from environment (keep existing prompts unchanged)
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
         # Read existing prompts if provided via environment (do not modify them)
@@ -260,7 +285,13 @@ async def chat(request: ChatRequest):
         base_system = VENNELA_PROMPT or SYSTEM_PROMPT or ""
 
         # Combine base system instruction with personality (if any)
-        combined_system_instruction = "\n\n".join([s for s in (base_system, VENNELA_PERSONALITY) if s])
+        memory_instruction = (
+            "Relevant durable user memories:\n" + retrieved_context
+            if retrieved_context else ""
+        )
+        combined_system_instruction = "\n\n".join(
+            s for s in (base_system, VENNELA_PERSONALITY, memory_instruction) if s
+        )
 
         # Centralized model chain obtained from gemini_config (env override supported)
         try:
@@ -293,6 +324,19 @@ async def chat(request: ChatRequest):
             if text is None:
                 # Some SDK variants put content differently
                 text = str(response)
+
+            if memory_identity:
+                try:
+                    from memory.smart_memory import save_memory, update_memory
+                    updated_memory = update_memory(
+                        memory_identity,
+                        request.message,
+                        text,
+                        memory,
+                    )
+                    save_memory(memory_identity, updated_memory)
+                except Exception as memory_error:
+                    logger.warning("Memory update unavailable for %s: %s", memory_identity, memory_error)
 
             return ChatResponse(response=text)
 

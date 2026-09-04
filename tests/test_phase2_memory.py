@@ -1,6 +1,8 @@
 from memory.orchestrator import MemoryOrchestrator
 from memory.retrieval import retrieve_memories
 from memory_semantic_linker import link_related_memories, update_memory_links
+from core.memory_core import process_memory
+from memory.smart_memory import update_memory
 
 
 def test_orchestrator_classifies_and_consolidates_duplicates():
@@ -32,3 +34,19 @@ def test_retrieval_ranks_importance_with_semantic_match():
     results = retrieve_memories(memory, "robotics", threshold=0.1, top_k=2)
 
     assert [result["text"] for result in results] == ["robotics goal", "robotics project"]
+
+
+def test_explicit_remember_statement_is_durable_and_retrievable():
+    statement = "Remember this: my favorite project codename is Project Nova."
+    processed = process_memory(statement)
+    assert processed["type"] == "preference"
+    assert processed["should_store"] is True
+
+    memory = update_memory("user-1", statement, "Saved.", {})
+    results = retrieve_memories(
+        memory,
+        "What was the project codename I told you to remember?",
+        threshold=0.1,
+    )
+    assert results
+    assert "Project Nova" in results[0]["text"]
