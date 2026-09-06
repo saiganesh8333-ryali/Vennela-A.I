@@ -2,7 +2,7 @@
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from memory.embedding_engine import get_embedding
@@ -297,7 +297,7 @@ def update_memory(
 
                 "event": compressed,
 
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
 
                 "importance": score
             })
@@ -324,7 +324,7 @@ def update_memory(
             elif existing is None:
                 memory["long_term"].append({
                     "text": compressed,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "importance": float(score),
                 })
 

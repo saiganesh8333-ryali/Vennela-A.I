@@ -1,6 +1,6 @@
 # core/memory_core.py
 """
-🧠 Enhanced Memory Core with Phase 2 Pattern Detection
+Enhanced Memory Core with Phase 2 Pattern Detection.
 Importance-based memory scoring with emotional + repetition + recency weights.
 """
 
@@ -10,6 +10,16 @@ from typing import Dict, Optional
 
 from core.memory_classifier import classify_memory
 from core.memory_compressor import compress_memory
+from memory.configuration import (
+    MAX_MEMORY_INPUT_LENGTH,
+    PREFERENCE_SCORE_THRESHOLD,
+    PERSISTENT_SCORE_THRESHOLD,
+    MemoryLifecycle,
+    has_explicit_memory_marker,
+    infer_domain,
+    is_transient_input,
+)
+from memory.models import MemoryDomain
 from memory_importance_calculator import get_importance_calculator
 from pattern_detector import get_pattern_detector
 
@@ -74,7 +84,8 @@ def extract_topic_from_message(user_message: str) -> str:
 
 def process_memory(
     user_message: str,
-    extract_patterns: bool = True
+    extract_patterns: bool = True,
+    domain=None,
 ) -> Dict:
     """
     Main memory processing pipeline with Phase 2 enhancements.
@@ -87,64 +98,74 @@ def process_memory(
         Memory processing data with importance score
     """
     
-    if not user_message:
-        return {}
-    
-    try:
-        
-        # STEP 1: CLASSIFY
-        memory_type = classify_memory(user_message)
-        
-        # STEP 2: COMPRESS
-        compressed_memory = compress_memory(user_message)
-        
-        # STEP 3: EXTRACT TOPIC
-        topic = extract_topic_from_message(user_message)
-        
-        # STEP 4: IMPORTANCE (Phase 2 - Advanced)
-        score = importance_score(user_message, topic=topic)
-        
-        # STEP 5: PATTERN DETECTION (Phase 2)
-        if extract_patterns:
-            detector = get_pattern_detector()
-            detector.process_conversation(
-                user_message,
-                ai_response="",  # Will be filled by caller
-                subject_tags=[topic],
-                timestamp=time.time()
-            )
-        
-        # STEP 6: DECISION
-        # Threshold: 0.4 = store (more aggressive than old 4/10 = 0.4)
-        explicit_memory = any(
-            marker in user_message.lower()
-            for marker in ("remember", "favorite", "my name is", "call me")
-        )
-        should_store = score >= 0.4 or explicit_memory
-        
-        memory_data = {
-            "type": memory_type,
-            "compressed": compressed_memory,
-            "topic": topic,
-            "importance": score,
-            "should_store": should_store,
-            "importance_category": (
-                "critical" if score >= 0.7 else
-                "high" if score >= 0.6 else
-                "medium" if score >= 0.4 else
-                "low"
-            )
+    if not isinstance(user_message, str) or not user_message.strip():
+        return {
+            "type": "general",
+            "category": "Fact",
+            "domain": infer_domain("", domain).value,
+            "importance": 0.0,
+            "should_store": False,
+            "lifecycle": MemoryLifecycle.TEMPORARY.value,
+            "reason": "empty",
         }
-        
-        logger.info(
-            f"🧠 Memory processed: {memory_data['importance_category'].upper()} "
-            f"({score:.2f}) - {topic}"
+
+    user_message = user_message[:MAX_MEMORY_INPUT_LENGTH].strip()
+    memory_type = classify_memory(user_message)
+    compressed_memory = compress_memory(user_message)
+    topic = extract_topic_from_message(user_message)
+    score = importance_score(user_message, topic=topic)
+    explicit_memory = has_explicit_memory_marker(user_message) or "favorite" in user_message.lower()
+    transient = is_transient_input(user_message)
+    resolved_domain = infer_domain(user_message, domain)
+
+    if extract_patterns:
+        detector = get_pattern_detector()
+        detector.process_conversation(
+            user_message,
+            ai_response="",
+            subject_tags=[topic],
+            timestamp=time.time(),
         )
-        
-        return memory_data
-    
-    except Exception as e:
-        
-        logger.error(f"Memory processing failed: {e}")
-        
-        return {}
+
+    persistent_signal = memory_type in {"profile", "preference", "goal", "project", "skill", "fact"}
+    should_store = not transient and (
+        explicit_memory
+        or resolved_domain is MemoryDomain.VENNELA_CORE
+        or score >= PERSISTENT_SCORE_THRESHOLD
+        or (persistent_signal and score >= PREFERENCE_SCORE_THRESHOLD)
+    )
+    lifecycle = MemoryLifecycle.PERSISTENT if should_store else (
+        MemoryLifecycle.TEMPORARY if transient else MemoryLifecycle.CANDIDATE
+    )
+    category = {
+        "profile": "Profile",
+        "preference": "Preference",
+        "goal": "Goal",
+        "project": "Project",
+        "skill": "Skill",
+        "event": "Event",
+        "fact": "Fact",
+    }.get(memory_type, "Fact")
+    memory_data = {
+        "type": memory_type,
+        "category": category,
+        "compressed": compressed_memory,
+        "topic": topic,
+        "domain": resolved_domain.value,
+        "importance": score,
+        "should_store": should_store,
+        "lifecycle": lifecycle.value,
+        "importance_category": (
+            "critical" if score >= 0.7 else
+            "high" if score >= 0.6 else
+            "medium" if score >= 0.4 else
+            "low"
+        ),
+    }
+    logger.info(
+        "Memory processed: %s (%.2f) - %s",
+        memory_data["lifecycle"],
+        score,
+        topic,
+    )
+    return memory_data
