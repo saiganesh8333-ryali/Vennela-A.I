@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from .api import MemoryAPI
-from .models import AuthContext, MemoryCategory, MemoryDomain, MemoryRecord
+from .models import AuthContext, MemoryCategory, MemoryDomain, MemoryRecord, MemoryStatus
 
 
 _CLASSIFICATION_MAP = {
@@ -165,7 +165,7 @@ class MemoryCompatibilityAdapter:
             session_id=effective_session_id,
             created_at=created_at,
             updated_at=updated_at,
-            active=True,
+            status=MemoryStatus.ACTIVE,
         )
 
     def persist(

@@ -1,10 +1,9 @@
 """Controlled Basic Memory API."""
 
-from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
-from .models import AuthContext, MemoryCategory, MemoryDomain, MemoryRecord
+from .models import AuthContext, MemoryCategory, MemoryDomain, MemoryRecord, MemoryStatus
 from .repository import MemoryRepository
 from .security import authorize
 
@@ -39,6 +38,8 @@ class MemoryAPI:
             raise ValueError("session_id is only valid for session memory")
         record = MemoryRecord.now(memory_id or str(uuid4()), context.user_id,
                                   domain_value, category_value, content, session_id)
+        # API writes are validated, user-authorized records and become retrievable.
+        record = record.transition(MemoryStatus.ACTIVE)
         return self.repository.create(record)
 
     store = create
@@ -62,10 +63,12 @@ class MemoryAPI:
         if existing is None:
             raise KeyError("memory not found")
         authorize(context, existing.domain, existing.session_id, existing)
-        updated = MemoryRecord(existing.memory_id, existing.owner_id, existing.domain,
-                                self._category(category) if category is not None else existing.category,
-                                content, existing.session_id, existing.created_at,
-                                datetime.now(timezone.utc), existing.active)
+        if existing.status is MemoryStatus.DELETED:
+            raise ValueError("deleted memory cannot be updated")
+        updated = existing.with_updates(
+            content=content,
+            category=self._category(category) if category is not None else existing.category,
+        )
         return self.repository.update(updated)
 
     def forget(self, context: AuthContext, memory_id: str):
@@ -75,6 +78,7 @@ class MemoryAPI:
         if existing is None:
             raise KeyError("memory not found")
         authorize(context, existing.domain, existing.session_id, existing)
-        return self.repository.forget(memory_id)
+        self.repository.transition_status(memory_id, MemoryStatus.DELETED)
+        return True
 
     delete = forget
