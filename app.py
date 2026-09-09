@@ -316,7 +316,8 @@ async def chat(request: ChatRequest, http_request: Request):
         retrieved_context = ""
         if memories:
             retrieved_context = "\n".join(
-                f"- {item.content}" for item in memories if item.content
+                f"- {item.content.get('text', item.content) if isinstance(item.content, dict) else item.content}"
+                for item in memories if item.content
             )
 
         # Read personality from environment (keep existing prompts unchanged)
@@ -369,14 +370,12 @@ async def chat(request: ChatRequest, http_request: Request):
                 # Some SDK variants put content differently
                 text = str(response)
 
-            if memory_api is not None and memory_context is not None and _is_memory_eligible(request.message):
-                stored_memory = memory_api.store(
-                    memory_context,
-                    request.message,
-                    _memory_category(request.message),
-                    domain="boss_personal",
+            if memory_api is not None and memory_context is not None:
+                from memory import SmartMemory
+                memory_decision = SmartMemory(memory_api).store(
+                    memory_context, request.message, domain="boss_personal", existing=memories,
                 )
-                if not stored_memory:
+                if memory_decision.action in {"create", "update"} and memory_decision.record is None:
                     raise RuntimeError("Basic memory store returned no saved record")
 
             return ChatResponse(response=text)
