@@ -137,3 +137,61 @@ class MemoryRelationship:
             metadata=metadata or {},
         )
 
+
+@dataclass(frozen=True)
+class ScoredMemory:
+    record: MemoryRecord
+    score: float
+    semantic_similarity: float = 0.0
+    importance: float = 0.0
+    recency: float = 0.0
+    session_boost: float = 0.0
+    relational_boost: float = 0.0
+
+    @property
+    def memory_id(self) -> str:
+        return self.record.memory_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "record": self.record.to_dict(),
+            "score": self.score,
+            "semantic_similarity": self.semantic_similarity,
+            "importance": self.importance,
+            "recency": self.recency,
+            "session_boost": self.session_boost,
+            "relational_boost": self.relational_boost,
+        }
+
+
+@dataclass(frozen=True)
+class ConsolidationResult:
+    primary_record: MemoryRecord
+    consolidated_records: list[MemoryRecord]
+    reason: str
+    action: str = "merge"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "primary_record": self.primary_record.to_dict(),
+            "consolidated_records": [r.to_dict() for r in self.consolidated_records],
+            "reason": self.reason,
+            "action": self.action,
+        }
+
+
+@dataclass(frozen=True)
+class ConflictResult:
+    status: str
+    winning_record: Optional[MemoryRecord]
+    conflicting_records: list[MemoryRecord]
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "winning_record": self.winning_record.to_dict() if self.winning_record else None,
+            "conflicting_records": [r.to_dict() for r in self.conflicting_records],
+            "reason": self.reason,
+        }
+
