@@ -32,14 +32,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _basic_memory_context():
+def _basic_memory_context(session_id: Optional[str] = None):
     """Build the single trusted Boss context from server configuration only."""
     from memory import AuthContext
 
     boss_id = os.getenv("VENNELA_BOSS_ID", "").strip()
     if not boss_id:
         raise RuntimeError("VENNELA_BOSS_ID is required for memory access")
-    return AuthContext(user_id=boss_id, authenticated=True, session_id=None)
+    normalized_session = session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
+    return AuthContext(user_id=boss_id, authenticated=True, session_id=normalized_session)
 
 
 def _basic_memory_api():
@@ -304,10 +305,11 @@ async def chat(request: ChatRequest, http_request: Request):
         memory_api = None
         memory_context = None
         try:
-            memory_context = _basic_memory_context()
+            memory_context = _basic_memory_context(request.session_id)
             memory_api = _basic_memory_api()
-            memories = memory_api.retrieve(
-                memory_context, domain="boss_personal", query=request.message, limit=5
+            from memory import ContextualMemory
+            memories = ContextualMemory(memory_api).select(
+                memory_context, request.message, session_id=memory_context.session_id, limit=5,
             )
         except Exception as memory_error:
             memories = []
