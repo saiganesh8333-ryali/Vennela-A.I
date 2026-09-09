@@ -9,9 +9,43 @@ import os
 import sys
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
+
+try:
+    from llm_router.adapter import VennelaLLMAdapter
+    from llm_router.contracts import RoutingError, FailureKind
+    from conversation.response_policy import ConversationAdjuster
+    ROUTER_AVAILABLE = True
+except ImportError:
+    ROUTER_AVAILABLE = False
+    VennelaLLMAdapter = None
+    RoutingError = Exception
+    FailureKind = None
+    ConversationAdjuster = None
+
+_llm_adapter_instance: Optional[Any] = None
+_conversation_adjuster_instance: Optional[Any] = None
+
+
+def get_llm_adapter() -> Any:
+    global _llm_adapter_instance
+    if _llm_adapter_instance is None:
+        if not ROUTER_AVAILABLE or VennelaLLMAdapter is None:
+            raise RuntimeError("LLM Router subsystem is not available")
+        _llm_adapter_instance = VennelaLLMAdapter()
+    return _llm_adapter_instance
+
+
+def get_conversation_adjuster() -> Any:
+    global _conversation_adjuster_instance
+    if _conversation_adjuster_instance is None:
+        if not ROUTER_AVAILABLE or ConversationAdjuster is None:
+            raise RuntimeError("ConversationAdjuster is not available")
+        _conversation_adjuster_instance = ConversationAdjuster()
+    return _conversation_adjuster_instance
 
 # =========================
 # CONFIGURATION
@@ -288,18 +322,8 @@ async def process_text(request: Dict[str, Any]):
 
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(request: ChatRequest, http_request: Request):
-    """Chat with Gemini AI."""
+    """Chat with Vennela AI via Conversation Adjuster and LLM Router."""
     try:
-        import google.generativeai as genai
-        import time as _time
-
-        api_key = os.getenv("GEMINI_API_KEY")
-
-        if not api_key:
-            raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
-
-        genai.configure(api_key=api_key)
-
         # Memory is always scoped to the server-configured Boss identity.
         memory_api = None
         memory_context = None
@@ -337,37 +361,22 @@ async def chat(request: ChatRequest, http_request: Request):
             s for s in (base_system, VENNELA_PERSONALITY, memory_instruction) if s
         )
 
-        # Centralized model chain obtained from gemini_config (env override supported)
-        try:
-            from gemini_config import get_gemini_model_chain
-            model_chain = get_gemini_model_chain()
-        except Exception:
-            # Fallback to single-model chain using the currently configured primary model
-            model_chain = ["gemini-3.5-flash"]
-            logger.warning("[Gemini] Could not load centralized GEMINI_MODEL_CHAIN; using default single primary model")
-
-        # Use centralized fallback helper
-        from gemini_fallback import call_gemini_with_fallback, GeminiFallbackError
-
-        GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "2"))
-        GEMINI_BACKOFF_BASE = float(os.getenv("GEMINI_BACKOFF_BASE", "0.5"))
+        adjuster = get_conversation_adjuster()
+        policy = adjuster.adjust(
+            request.message,
+            user_system_instruction=combined_system_instruction or None,
+        )
+        adapter = get_llm_adapter()
 
         try:
-            response = call_gemini_with_fallback(
-                genai,
+            result = adapter.route_text(
                 request.message,
-                system_instruction=combined_system_instruction,
-                model_chain=model_chain,
-                preferred_first=None,
-                max_retries=GEMINI_MAX_RETRIES,
-                backoff_base=GEMINI_BACKOFF_BASE,
+                system_instruction=policy.system_instruction,
+                latency_sensitive=policy.latency_sensitive,
+                max_tokens=policy.max_tokens,
+                task_hint=policy.task_hint,
             )
-
-            # response is the SDK response object; return text if present
-            text = getattr(response, 'text', None)
-            if text is None:
-                # Some SDK variants put content differently
-                text = str(response)
+            text = result.get("text", "")
 
             if memory_api is not None and memory_context is not None and _is_memory_eligible(request.message):
                 stored_memory = memory_api.store(
@@ -381,37 +390,117 @@ async def chat(request: ChatRequest, http_request: Request):
 
             return ChatResponse(response=text)
 
+        except RoutingError as exc:
+            logger.error("[LLMRouter] Routing failure [%s]: %s", getattr(exc.failure, "kind", "ERROR"), exc)
+            if FailureKind is not None and getattr(exc.failure, "kind", None) in {
+                FailureKind.NO_API_KEY,
+                FailureKind.AUTHENTICATION,
+            }:
+                raise HTTPException(status_code=401, detail=f"LLM authentication failed: {exc.failure.message}")
+            raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
         except HTTPException:
             raise
-        except GeminiFallbackError as gf:
-            logger.error(f"[Gemini] All configured models failed: {gf}")
-            raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
         except Exception as e:
-            # Permanent errors will surface here; map to clean client-facing errors
-            logger.error(f"Chat error: {e}")
-            status = getattr(e, 'status_code', None) or getattr(e, 'code', None) or None
-            # Map explicit authentication/invalid-key messages to 401 so callers see auth failure
-            msg = str(e).lower() if e is not None else ''
-            if status == 401 or any(token in msg for token in ("invalid api key", "invalidapikey", "unauthorized", "authentication", "invalid api", "invalid auth")):
-                raise HTTPException(status_code=401, detail="Gemini authentication failed")
-            # Generic internal error
+            logger.error("Chat execution error: %s", e)
             raise HTTPException(status_code=500, detail="Internal AI error")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Chat error: {e}")
-        # Do not include provider raw error text in HTTP response
         raise HTTPException(status_code=500, detail="Internal AI error")
+
+
+@app.post("/chat/stream", tags=["chat"])
+async def chat_stream(request: ChatRequest, http_request: Request):
+    """Stream chat response via Conversation Adjuster and LLM Router."""
+    try:
+        retrieved_context = ""
+        try:
+            memory_context = _basic_memory_context()
+            memory_api = _basic_memory_api()
+            memories = memory_api.retrieve(
+                memory_context, domain="boss_personal", query=request.message, limit=5
+            )
+            if memories:
+                retrieved_context = "\n".join(
+                    f"- {item.content}" for item in memories if item.content
+                )
+        except Exception as memory_error:
+            logger.warning("Basic memory load unavailable: %s", memory_error)
+
+        base_system = os.getenv("VENNELA_PROMPT", "") or os.getenv("SYSTEM_PROMPT", "")
+        combined_system_instruction = "\n\n".join(
+            s for s in (
+                base_system,
+                os.getenv("VENNELA_PERSONALITY", ""),
+                "Relevant durable user memories:\n" + retrieved_context if retrieved_context else "",
+            ) if s
+        )
+        policy = get_conversation_adjuster().adjust(
+            request.message,
+            user_system_instruction=combined_system_instruction or None,
+        )
+        adapter = get_llm_adapter()
+
+        def token_generator():
+            try:
+                yield from adapter.stream_text(
+                    request.message,
+                    system_instruction=policy.system_instruction,
+                    latency_sensitive=policy.latency_sensitive,
+                    max_tokens=policy.max_tokens,
+                )
+            except Exception as exc:
+                logger.error("[LLMRouter Stream] Error: %s", exc)
+                yield "\n[AI stream error]"
+
+        return StreamingResponse(token_generator(), media_type="text/plain; charset=utf-8")
+    except Exception as exc:
+        logger.error("Chat stream setup error: %s", exc)
+        raise HTTPException(status_code=500, detail="Internal AI error")
+
+
+@app.get("/router/health", tags=["router"])
+async def router_health():
+    """Get diagnostic health and circuit breaker summary of LLM Router."""
+    try:
+        return get_llm_adapter().health_summary()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/router/models", tags=["router"])
+async def router_models():
+    """List configured model profiles in LLM Router."""
+    try:
+        return get_llm_adapter().model_catalog()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @app.get("/status", tags=["health"])
 async def status():
     """Get detailed status."""
+    router_status = "unavailable"
+    health_info = {}
+    try:
+        health_info = get_llm_adapter().health_summary()
+        router_status = "active"
+    except Exception as exc:
+        router_status = f"error: {exc}"
+
     return {
         "status": "running",
         "lightweight_mode": LIGHTWEIGHT_MODE,
         "phases": "1-5 (All systems active)",
+        "router": {
+            "status": router_status,
+            "providers": health_info,
+        },
         "modules": {
+            "llm_router": "llm_router.adapter.VennelaLLMAdapter",
+            "conversation_adjuster": "conversation.response_policy.ConversationAdjuster",
             "embeddings": "lightweight_embeddings",
             "nlp": "lightweight_nlp",
             "ml": "lightweight_ml",
