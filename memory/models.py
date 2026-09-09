@@ -195,3 +195,109 @@ class ConflictResult:
             "reason": self.reason,
         }
 
+
+class MemoryLifecycleState(str, Enum):
+    NEW = "NEW"
+    ACTIVE = "ACTIVE"
+    REINFORCED = "REINFORCED"
+    SUPERSEDED = "SUPERSEDED"
+    OBSOLETE = "OBSOLETE"
+    INACTIVE = "INACTIVE"
+
+
+@dataclass(frozen=True)
+class ProactiveMemory:
+    record: MemoryRecord
+    score: float
+    reason: str
+    confidence: float
+    surfaced_at: datetime
+
+    @property
+    def memory_id(self) -> str:
+        return self.record.memory_id
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "record": self.record.to_dict(),
+            "score": self.score,
+            "reason": self.reason,
+            "confidence": self.confidence,
+            "surfaced_at": self.surfaced_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True)
+class ProactiveRecallResult:
+    recalled_memories: list[ProactiveMemory]
+    suppressed_count: int
+    context_evaluated: str
+    timestamp: datetime
+
+    def __iter__(self):
+        return iter(self.recalled_memories)
+
+    def __len__(self) -> int:
+        return len(self.recalled_memories)
+
+    def __getitem__(self, index: int) -> ProactiveMemory:
+        return self.recalled_memories[index]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "recalled_memories": [m.to_dict() for m in self.recalled_memories],
+            "suppressed_count": self.suppressed_count,
+            "context_evaluated": self.context_evaluated,
+            "timestamp": self.timestamp.isoformat(),
+            "total_recalled": len(self.recalled_memories),
+        }
+
+
+@dataclass(frozen=True)
+class PreferenceEvolutionResult:
+    topic: str
+    current_preference: Optional[MemoryRecord]
+    historical_preferences: list[MemoryRecord]
+    conflicting_preferences: list[MemoryRecord]
+    action_taken: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "topic": self.topic,
+            "current_preference": self.current_preference.to_dict() if self.current_preference else None,
+            "historical_preferences": [m.to_dict() for m in self.historical_preferences],
+            "conflicting_preferences": [m.to_dict() for m in self.conflicting_preferences],
+            "action_taken": self.action_taken,
+        }
+
+
+@dataclass(frozen=True)
+class UserModel:
+    user_id: str
+    preferences: list[MemoryRecord]
+    goals: list[MemoryRecord]
+    projects: list[MemoryRecord]
+    skills: list[MemoryRecord]
+    interests: list[MemoryRecord]
+    key_facts: list[MemoryRecord]
+    recent_events: list[MemoryRecord]
+    relationships: list[MemoryRelationship]
+    generated_at: datetime
+    summary_prompt: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "user_id": self.user_id,
+            "preferences": [m.to_dict() for m in self.preferences],
+            "goals": [m.to_dict() for m in self.goals],
+            "projects": [m.to_dict() for m in self.projects],
+            "skills": [m.to_dict() for m in self.skills],
+            "interests": [m.to_dict() for m in self.interests],
+            "key_facts": [m.to_dict() for m in self.key_facts],
+            "recent_events": [m.to_dict() for m in self.recent_events],
+            "relationships": [r.to_dict() for r in self.relationships],
+            "generated_at": self.generated_at.isoformat(),
+            "summary_prompt": self.summary_prompt,
+        }
+
+
