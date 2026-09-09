@@ -9,9 +9,43 @@ import os
 import sys
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import logging
+
+try:
+    from llm_router.adapter import VennelaLLMAdapter
+    from llm_router.contracts import RoutingError, FailureKind
+    from conversation.response_policy import ConversationAdjuster
+    ROUTER_AVAILABLE = True
+except ImportError as exc:
+    ROUTER_AVAILABLE = False
+    VennelaLLMAdapter = None
+    RoutingError = Exception
+    FailureKind = None
+    ConversationAdjuster = None
+
+_llm_adapter_instance: Optional[Any] = None
+_conversation_adjuster_instance: Optional[Any] = None
+
+
+def get_llm_adapter() -> Any:
+    global _llm_adapter_instance
+    if _llm_adapter_instance is None:
+        if not ROUTER_AVAILABLE or VennelaLLMAdapter is None:
+            raise RuntimeError("LLM Router subsystem is not available")
+        _llm_adapter_instance = VennelaLLMAdapter()
+    return _llm_adapter_instance
+
+
+def get_conversation_adjuster() -> Any:
+    global _conversation_adjuster_instance
+    if _conversation_adjuster_instance is None:
+        if not ROUTER_AVAILABLE or ConversationAdjuster is None:
+            raise RuntimeError("ConversationAdjuster is not available")
+        _conversation_adjuster_instance = ConversationAdjuster()
+    return _conversation_adjuster_instance
 
 # =========================
 # CONFIGURATION
@@ -79,6 +113,89 @@ def _is_memory_eligible(message: str) -> bool:
         "prefer", "my goal", "i want", "my project", "my skill", "i can ",
         "interested in",
     ))
+
+
+# =========================
+# TEMPORAL, TASK & REMINDER SINGLETONS
+# =========================
+
+_temporal_context: Optional[Any] = None
+_task_manager: Optional[Any] = None
+_reminder_manager: Optional[Any] = None
+_reminder_scheduler: Optional[Any] = None
+
+
+def _get_owner_id(request_user_id: Optional[str] = None) -> str:
+    """Resolve authoritative owner id for task/reminder isolation."""
+    if request_user_id and request_user_id.strip():
+        return request_user_id.strip()
+    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip()
+    if boss_id:
+        return boss_id
+    return "boss_user"
+
+
+def get_temporal_context():
+    global _temporal_context
+    if _temporal_context is None:
+        from core.temporal.context import TemporalContext, DEFAULT_TIMEZONE
+        tz = os.getenv("DEFAULT_TIMEZONE", DEFAULT_TIMEZONE)
+        _temporal_context = TemporalContext(tz_name=tz)
+    return _temporal_context
+
+
+def get_task_manager():
+    global _task_manager
+    if _task_manager is None:
+        from core.tasks import TaskManager
+        url = os.getenv("SUPABASE_URL", "").strip()
+        key = os.getenv("SUPABASE_KEY", "").strip()
+        if url and key:
+            try:
+                from supabase import create_client
+                from core.tasks.repository import SupabaseTaskRepository
+                repo = SupabaseTaskRepository(create_client(url, key))
+            except Exception as e:
+                logger.warning("Supabase task repo unavailable, falling back to in-memory: %s", e)
+                from core.tasks.repository import InMemoryTaskRepository
+                repo = InMemoryTaskRepository()
+        else:
+            from core.tasks.repository import InMemoryTaskRepository
+            repo = InMemoryTaskRepository()
+        _task_manager = TaskManager(repository=repo, temporal_context=get_temporal_context())
+    return _task_manager
+
+
+def get_reminder_manager():
+    global _reminder_manager
+    if _reminder_manager is None:
+        from core.reminders import ReminderManager
+        url = os.getenv("SUPABASE_URL", "").strip()
+        key = os.getenv("SUPABASE_KEY", "").strip()
+        if url and key:
+            try:
+                from supabase import create_client
+                from core.reminders.repository import SupabaseReminderRepository
+                repo = SupabaseReminderRepository(create_client(url, key))
+            except Exception as e:
+                logger.warning("Supabase reminder repo unavailable, falling back to in-memory: %s", e)
+                from core.reminders.repository import InMemoryReminderRepository
+                repo = InMemoryReminderRepository()
+        else:
+            from core.reminders.repository import InMemoryReminderRepository
+            repo = InMemoryReminderRepository()
+        _reminder_manager = ReminderManager(repository=repo, temporal_context=get_temporal_context())
+    return _reminder_manager
+
+
+def get_reminder_scheduler():
+    global _reminder_scheduler
+    if _reminder_scheduler is None:
+        from core.scheduler import ReminderScheduler
+        rm = get_reminder_manager()
+        _reminder_scheduler = ReminderScheduler(repository=rm.repository, temporal_context=get_temporal_context())
+    return _reminder_scheduler
+
 
 # =========================
 # FASTAPI APP
@@ -152,6 +269,37 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+
+
+class TaskCreateRequest(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    priority: Optional[str] = "NORMAL"
+    due_expr: Optional[str] = None
+    due_at: Optional[str] = None
+    start_expr: Optional[str] = None
+    start_at: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+class TaskUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    due_expr: Optional[str] = None
+    due_at: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+class ReminderCreateRequest(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    remind_expr: Optional[str] = None
+    remind_at: Optional[str] = None
+    timezone: Optional[str] = None
+    task_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 # =========================
@@ -287,23 +435,265 @@ async def process_text(request: Dict[str, Any]):
 
 
 
+@app.get("/time", tags=["temporal"])
+async def get_current_time():
+    """Get current timezone-aware time."""
+    temporal = get_temporal_context()
+    now_dt = temporal.now()
+    return {
+        "timezone": temporal.timezone_name,
+        "time": temporal.format_time(now_dt),
+        "iso": now_dt.isoformat(),
+        "hour": now_dt.hour,
+        "minute": now_dt.minute,
+        "second": now_dt.second,
+    }
+
+
+@app.get("/date", tags=["temporal"])
+async def get_current_date():
+    """Get current timezone-aware date and weekday information."""
+    temporal = get_temporal_context()
+    now_dt = temporal.now()
+    tomorrow_dt = temporal.tomorrow()
+    return {
+        "timezone": temporal.timezone_name,
+        "date": temporal.format_date(now_dt),
+        "day_of_week": temporal.day_of_week(now_dt),
+        "iso": now_dt.date().isoformat(),
+        "tomorrow": {
+            "date": temporal.format_date(tomorrow_dt),
+            "day_of_week": temporal.day_of_week(tomorrow_dt),
+            "iso": tomorrow_dt.date().isoformat(),
+        }
+    }
+
+
+# =========================
+# TASK ENDPOINTS
+# =========================
+
+@app.post("/tasks", tags=["tasks"])
+async def create_task(request: TaskCreateRequest):
+    """Create a new task with temporal due date resolution."""
+    try:
+        from core.tasks.models import TaskPriority
+        task_mgr = get_task_manager()
+        owner_id = _get_owner_id(request.user_id)
+        priority = TaskPriority(request.priority) if request.priority in TaskPriority.__members__ else TaskPriority.NORMAL
+
+        task = task_mgr.create_task(
+            owner_id=owner_id,
+            title=request.title,
+            description=request.description or "",
+            priority=priority,
+            due_expr=request.due_expr,
+            start_expr=request.start_expr,
+        )
+        return task.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Task create error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tasks", tags=["tasks"])
+async def list_tasks(status: Optional[str] = None, due_date: Optional[str] = None, user_id: Optional[str] = None):
+    """List tasks for authenticated owner."""
+    try:
+        from core.tasks.models import TaskStatus
+        task_mgr = get_task_manager()
+        owner_id = _get_owner_id(user_id)
+        task_status = TaskStatus(status) if status and status in TaskStatus.__members__ else None
+
+        tasks = task_mgr.list_tasks(owner_id=owner_id, status=task_status, due_date_expr=due_date)
+        return [t.to_dict() for t in tasks]
+    except Exception as e:
+        logger.error(f"Task list error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tasks/{task_id}", tags=["tasks"])
+async def get_task(task_id: str, user_id: Optional[str] = None):
+    """Get single task by ID with owner isolation."""
+    try:
+        task_mgr = get_task_manager()
+        owner_id = _get_owner_id(user_id)
+        task = task_mgr.get_task(owner_id=owner_id, task_id=task_id)
+        return task.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Access denied: Not task owner")
+    except Exception as e:
+        logger.error(f"Task get error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/tasks/{task_id}", tags=["tasks"])
+async def update_task(task_id: str, request: TaskUpdateRequest):
+    """Update task details."""
+    try:
+        from core.tasks.models import TaskPriority, TaskStatus
+        task_mgr = get_task_manager()
+        owner_id = _get_owner_id(request.user_id)
+        task_status = TaskStatus(request.status) if request.status and request.status in TaskStatus.__members__ else None
+        priority = TaskPriority(request.priority) if request.priority and request.priority in TaskPriority.__members__ else None
+
+        task = task_mgr.update_task(
+            owner_id=owner_id,
+            task_id=task_id,
+            title=request.title,
+            description=request.description,
+            status=task_status,
+            priority=priority,
+            due_expr=request.due_expr,
+        )
+        return task.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Access denied: Not task owner")
+    except Exception as e:
+        logger.error(f"Task update error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tasks/{task_id}/complete", tags=["tasks"])
+async def complete_task(task_id: str, user_id: Optional[str] = None):
+    """Mark a task as completed."""
+    try:
+        task_mgr = get_task_manager()
+        owner_id = _get_owner_id(user_id)
+        task = task_mgr.complete_task(owner_id=owner_id, task_id=task_id)
+        return task.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Access denied: Not task owner")
+    except Exception as e:
+        logger.error(f"Task complete error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/tasks/{task_id}", tags=["tasks"])
+async def cancel_task(task_id: str, user_id: Optional[str] = None):
+    """Cancel a task."""
+    try:
+        task_mgr = get_task_manager()
+        owner_id = _get_owner_id(user_id)
+        task = task_mgr.cancel_task(owner_id=owner_id, task_id=task_id)
+        return task.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Access denied: Not task owner")
+    except Exception as e:
+        logger.error(f"Task cancel error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================
+# REMINDER ENDPOINTS
+# =========================
+
+@app.post("/reminders", tags=["reminders"])
+async def create_reminder(request: ReminderCreateRequest):
+    """Create a new reminder with temporal resolution."""
+    try:
+        rem_mgr = get_reminder_manager()
+        owner_id = _get_owner_id(request.user_id)
+        reminder = rem_mgr.create_reminder(
+            owner_id=owner_id,
+            title=request.title,
+            description=request.description or "",
+            remind_expr=request.remind_expr,
+            tz_name=request.timezone,
+            task_id=request.task_id,
+        )
+        return reminder.to_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Reminder create error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reminders", tags=["reminders"])
+async def list_reminders(status: Optional[str] = None, user_id: Optional[str] = None):
+    """List reminders for authenticated owner."""
+    try:
+        from core.reminders.models import ReminderStatus
+        rem_mgr = get_reminder_manager()
+        owner_id = _get_owner_id(user_id)
+        rem_status = ReminderStatus(status) if status and status in ReminderStatus.__members__ else None
+        reminders = rem_mgr.list_reminders(owner_id=owner_id, status=rem_status)
+        return [r.to_dict() for r in reminders]
+    except Exception as e:
+        logger.error(f"Reminder list error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/reminders/{reminder_id}", tags=["reminders"])
+async def get_reminder(reminder_id: str, user_id: Optional[str] = None):
+    """Get reminder by ID."""
+    try:
+        rem_mgr = get_reminder_manager()
+        owner_id = _get_owner_id(user_id)
+        reminder = rem_mgr.get_reminder(owner_id=owner_id, reminder_id=reminder_id)
+        return reminder.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Access denied: Not reminder owner")
+    except Exception as e:
+        logger.error(f"Reminder get error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/reminders/{reminder_id}", tags=["reminders"])
+async def cancel_reminder(reminder_id: str, user_id: Optional[str] = None):
+    """Cancel a reminder."""
+    try:
+        rem_mgr = get_reminder_manager()
+        owner_id = _get_owner_id(user_id)
+        reminder = rem_mgr.cancel_reminder(owner_id=owner_id, reminder_id=reminder_id)
+        return reminder.to_dict()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Access denied: Not reminder owner")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Reminder cancel error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =========================
+# CHAT ENDPOINTS (NEXUS INTEGRATED)
+# =========================
+
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(request: ChatRequest, http_request: Request):
-    """Chat with Gemini AI."""
+    """Chat with Vennela AI via NEXUS intent router, Conversation Adjuster, and LLM Router."""
     try:
-        import google.generativeai as genai
-        import time as _time
+        # 1. Check for deterministic Temporal / Task / Reminder intent via NEXUS
+        from core.nexus_intent import NexusIntentClassifier, execute_nexus_intent
+        temporal = get_temporal_context()
+        intent_res = NexusIntentClassifier(temporal).classify(request.message)
+        if intent_res.is_actionable:
+            owner_id = _get_owner_id(request.user_id)
+            task_mgr = get_task_manager()
+            rem_mgr = get_reminder_manager()
+            action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
+            return ChatResponse(response=action_resp)
 
-        api_key = os.getenv("GEMINI_API_KEY")
-
-        if not api_key:
-            raise HTTPException(status_code=400, detail="GEMINI_API_KEY not configured")
-
-        genai.configure(api_key=api_key)
-
-        # Memory is always scoped to the server-configured Boss identity.
+        # 2. Memory is always scoped to the server-configured Boss identity.
         memory_api = None
         memory_context = None
+        memories = []
         try:
             memory_context = _basic_memory_context(request.session_id)
             memory_api = _basic_memory_api()
@@ -340,79 +730,177 @@ async def chat(request: ChatRequest, http_request: Request):
             s for s in (base_system, VENNELA_PERSONALITY, memory_instruction) if s
         )
 
-        # Centralized model chain obtained from gemini_config (env override supported)
+        # 3. Apply Conversation Adjuster Policy (Concise by default, detailed when requested)
+        adjuster = get_conversation_adjuster()
+        policy = adjuster.adjust(
+            request.message,
+            user_system_instruction=combined_system_instruction or None,
+        )
+
+        # 4. Route via VennelaLLMAdapter to Frozen LLM Router V1
+        adapter = get_llm_adapter()
         try:
-            from gemini_config import get_gemini_model_chain
-            model_chain = get_gemini_model_chain()
-        except Exception:
-            # Fallback to single-model chain using the currently configured primary model
-            model_chain = ["gemini-3.5-flash"]
-            logger.warning("[Gemini] Could not load centralized GEMINI_MODEL_CHAIN; using default single primary model")
-
-        # Use centralized fallback helper
-        from gemini_fallback import call_gemini_with_fallback, GeminiFallbackError
-
-        GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", "2"))
-        GEMINI_BACKOFF_BASE = float(os.getenv("GEMINI_BACKOFF_BASE", "0.5"))
-
-        try:
-            response = call_gemini_with_fallback(
-                genai,
+            result = adapter.route_text(
                 request.message,
-                system_instruction=combined_system_instruction,
-                model_chain=model_chain,
-                preferred_first=None,
-                max_retries=GEMINI_MAX_RETRIES,
-                backoff_base=GEMINI_BACKOFF_BASE,
+                system_instruction=policy.system_instruction,
+                latency_sensitive=policy.latency_sensitive,
+                max_tokens=policy.max_tokens,
+                task_hint=policy.task_hint,
             )
+            text = result.get("text", "")
 
-            # response is the SDK response object; return text if present
-            text = getattr(response, 'text', None)
-            if text is None:
-                # Some SDK variants put content differently
-                text = str(response)
-
+            # 5. Store to Smart Memory if configured
             if memory_api is not None and memory_context is not None:
-                from memory import SmartMemory
-                memory_decision = SmartMemory(memory_api).store(
-                    memory_context, request.message, domain="boss_personal", existing=memories,
-                )
-                if memory_decision.action in {"create", "update"} and memory_decision.record is None:
-                    raise RuntimeError("Basic memory store returned no saved record")
+                try:
+                    from memory import SmartMemory
+                    memory_decision = SmartMemory(memory_api).store(
+                        memory_context, request.message, domain="boss_personal", existing=memories,
+                    )
+                    if memory_decision.action in {"create", "update"} and memory_decision.record is None:
+                        raise RuntimeError("Basic memory store returned no saved record")
+                except Exception as store_err:
+                    logger.warning("SmartMemory store warning: %s", store_err)
 
             return ChatResponse(response=text)
 
+        except RoutingError as exc:
+            logger.error(f"[LLMRouter] Routing failure [{getattr(exc.failure, 'kind', 'ERROR')}]: {exc}")
+            if FailureKind is not None and getattr(exc.failure, "kind", None) in {FailureKind.NO_API_KEY, FailureKind.AUTHENTICATION}:
+                raise HTTPException(status_code=401, detail=f"LLM authentication failed: {exc.failure.message}")
+            raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
         except HTTPException:
             raise
-        except GeminiFallbackError as gf:
-            logger.error(f"[Gemini] All configured models failed: {gf}")
-            raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
         except Exception as e:
-            # Permanent errors will surface here; map to clean client-facing errors
-            logger.error(f"Chat error: {e}")
-            status = getattr(e, 'status_code', None) or getattr(e, 'code', None) or None
-            # Map explicit authentication/invalid-key messages to 401 so callers see auth failure
-            msg = str(e).lower() if e is not None else ''
-            if status == 401 or any(token in msg for token in ("invalid api key", "invalidapikey", "unauthorized", "authentication", "invalid api", "invalid auth")):
-                raise HTTPException(status_code=401, detail="Gemini authentication failed")
-            # Generic internal error
+            logger.error(f"Chat execution error: {e}")
             raise HTTPException(status_code=500, detail="Internal AI error")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Chat error: {e}")
-        # Do not include provider raw error text in HTTP response
-        raise HTTPException(status_code=500, detail="Internal AI error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/stream", tags=["chat"])
+async def chat_stream(request: ChatRequest, http_request: Request):
+    """Stream chat response with token-by-token output via Conversation Adjuster and LLM Router."""
+    try:
+        # 1. Check for deterministic Temporal / Task / Reminder intent via NEXUS
+        from core.nexus_intent import NexusIntentClassifier, execute_nexus_intent
+        temporal = get_temporal_context()
+        intent_res = NexusIntentClassifier(temporal).classify(request.message)
+        if intent_res.is_actionable:
+            owner_id = _get_owner_id(request.user_id)
+            task_mgr = get_task_manager()
+            rem_mgr = get_reminder_manager()
+            action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
+            return StreamingResponse(iter([action_resp]), media_type="text/plain; charset=utf-8")
+
+        # Build memory context & personality
+        retrieved_context = ""
+        try:
+            memory_context = _basic_memory_context(request.session_id)
+            memory_api = _basic_memory_api()
+            from memory import ContextualMemory
+            memories = ContextualMemory(memory_api).select(
+                memory_context, request.message, session_id=memory_context.session_id, limit=5,
+            )
+            if memories:
+                retrieved_context = "\n".join(
+                    f"- {item.content.get('text', item.content) if isinstance(item.content, dict) else item.content}"
+                    for item in memories if item.content
+                )
+        except Exception as memory_error:
+            logger.warning("Basic memory load unavailable: %s", memory_error)
+
+        VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
+        VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", "")
+        SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
+        base_system = VENNELA_PROMPT or SYSTEM_PROMPT or ""
+        memory_instruction = (
+            "Relevant durable user memories:\n" + retrieved_context
+            if retrieved_context else ""
+        )
+        combined_system_instruction = "\n\n".join(
+            s for s in (base_system, VENNELA_PERSONALITY, memory_instruction) if s
+        )
+
+        adjuster = get_conversation_adjuster()
+        policy = adjuster.adjust(
+            request.message,
+            user_system_instruction=combined_system_instruction or None,
+        )
+
+        adapter = get_llm_adapter()
+
+        def token_generator():
+            try:
+                for token in adapter.stream_text(
+                    request.message,
+                    system_instruction=policy.system_instruction,
+                    latency_sensitive=policy.latency_sensitive,
+                    max_tokens=policy.max_tokens,
+                ):
+                    yield token
+            except Exception as exc:
+                logger.error(f"[LLMRouter Stream] Error: {exc}")
+                yield f"\n[AI stream error: {exc}]"
+
+        return StreamingResponse(token_generator(), media_type="text/plain; charset=utf-8")
+
+    except Exception as e:
+        logger.error(f"Chat stream setup error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/router/health", tags=["router"])
+async def router_health():
+    """Get diagnostic health and circuit breaker summary of LLM Router."""
+    try:
+        adapter = get_llm_adapter()
+        return adapter.health_summary()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/router/models", tags=["router"])
+async def router_models():
+    """List configured model profiles in LLM Router."""
+    try:
+        adapter = get_llm_adapter()
+        return adapter.model_catalog()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @app.get("/status", tags=["health"])
 async def status():
     """Get detailed status."""
+    router_status = "unavailable"
+    health_info = {}
+    try:
+        adapter = get_llm_adapter()
+        health_info = adapter.health_summary()
+        router_status = "active"
+    except Exception as exc:
+        router_status = f"error: {exc}"
+
     return {
         "status": "running",
         "lightweight_mode": LIGHTWEIGHT_MODE,
-        "phases": "1-5 (All systems active)",
+        "phases": "1-5 + Temporal/Task/Reminder (All systems active)",
+        "router": {
+            "status": router_status,
+            "providers": health_info,
+        },
         "modules": {
+            "llm_router": "llm_router.adapter.VennelaLLMAdapter",
+            "conversation_adjuster": "conversation.response_policy.ConversationAdjuster",
+            "temporal_context": "core.temporal.TemporalContext",
+            "task_manager": "core.tasks.TaskManager",
+            "reminder_manager": "core.reminders.ReminderManager",
+            "reminder_scheduler": "core.scheduler.ReminderScheduler",
+            "nexus_intent": "core.nexus_intent.NexusIntentClassifier",
             "embeddings": "lightweight_embeddings",
             "nlp": "lightweight_nlp",
             "ml": "lightweight_ml",
@@ -554,6 +1042,12 @@ async def startup_event():
     logger.info("Vennela AI starting up...")
     logger.info(f"Lightweight mode: {LIGHTWEIGHT_MODE}")
     logger.info(f"Python runtime: {sys.version.split()[0]}")
+    try:
+        scheduler = get_reminder_scheduler()
+        await scheduler.start()
+        logger.info("Reminder scheduler started successfully.")
+    except Exception as exc:
+        logger.warning(f"Could not start reminder scheduler: {exc}")
     print("SERVER STARTED OK")
 
 
@@ -561,6 +1055,12 @@ async def startup_event():
 async def shutdown_event():
     """Run on shutdown."""
     logger.info("Vennela AI shutting down...")
+    try:
+        global _reminder_scheduler
+        if _reminder_scheduler is not None:
+            await _reminder_scheduler.stop()
+    except Exception as exc:
+        logger.warning(f"Error stopping reminder scheduler: {exc}")
 
 
 # =========================
