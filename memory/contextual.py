@@ -27,6 +27,15 @@ class ContextualMemory:
         return set(re.findall(r"[a-z0-9]+", value.lower()))
 
     @staticmethod
+    def _fact_subject(value: str) -> str | None:
+        """Group explicit relationship facts so stale corrections are not equally authoritative."""
+        match = re.search(
+            r"\bmy\s+(father|mother|parent|brother|sister|son|daughter|spouse|wife|husband)(?:'s)?\s+name\b",
+            value.lower(),
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
     def _importance(record: MemoryRecord) -> float:
         if isinstance(record.content, dict):
             try:
@@ -96,4 +105,18 @@ class ContextualMemory:
             -entry[1].updated_at.timestamp(),
             entry[1].memory_id,
         ))
-        return [record for _, record in scored[:limit]]
+        latest_by_subject: dict[str, MemoryRecord] = {}
+        for _, record in scored:
+            subject = self._fact_subject(self._text(record.content))
+            if subject is None:
+                continue
+            current = latest_by_subject.get(subject)
+            if current is None or record.updated_at > current.updated_at:
+                latest_by_subject[subject] = record
+
+        latest_ids = {record.memory_id for record in latest_by_subject.values()}
+        return [
+            record for _, record in scored
+            if self._fact_subject(self._text(record.content)) is None
+            or record.memory_id in latest_ids
+        ][:limit]

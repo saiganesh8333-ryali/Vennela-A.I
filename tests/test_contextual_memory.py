@@ -91,3 +91,16 @@ def test_irrelevant_records_are_excluded_and_results_are_bounded(memory_api):
 
     assert len(records) == 3
     assert all(record.memory_id != "irrelevant" for record in records)
+
+
+def test_latest_explicit_relationship_correction_wins(memory_api):
+    context = AuthContext("boss")
+    old = add(memory_api, context, "My mother's name is Lalitha", memory_id="old")
+    new = add(memory_api, context, "My mother's name is Satya Veni", memory_id="new")
+
+    records = ContextualMemory(memory_api).select(
+        context, "what is my mother's name", limit=5
+    )
+
+    assert [record.memory_id for record in records] == [new.memory_id]
+    assert old.memory_id not in {record.memory_id for record in records}

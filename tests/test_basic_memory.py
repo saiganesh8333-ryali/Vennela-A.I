@@ -72,3 +72,37 @@ def test_chat_memory_ignores_client_identity():
     assert "retrieval" not in names
     assert "x-user-id" not in constants
     assert "x-session-id" not in constants
+
+
+def test_chat_context_adds_bounded_stable_memory_and_deduplicates(api):
+    context = AuthContext("boss")
+    profile = api.create(
+        context,
+        {"text": "Preferred name is Boss", "importance": 1.0},
+        "Profile",
+    )
+    project = api.create(
+        context,
+        {"text": "Building the Vennela project", "importance": 0.9},
+        "Project",
+    )
+    relevant = api.create(
+        context,
+        {"text": "The Vennela project uses the router", "importance": 0.4},
+        "Fact",
+    )
+
+    stable = app._retrieve_stable_chat_memories(context, api)
+    semantic = app._retrieve_chat_memories(context, api, "router")
+    instruction = app._build_chat_memory_instruction(stable, semantic)
+
+    assert "Preferred name is Boss" in instruction
+    assert "Building the Vennela project" in instruction
+    assert "The Vennela project uses the router" in instruction
+    assert instruction.count("Building the Vennela project") == 1
+    assert len(stable) <= 12
+    assert profile.memory_id in {record.memory_id for record in stable}
+
+
+def test_chat_context_does_not_fabricate_when_memory_is_unavailable():
+    assert app._build_chat_memory_instruction([], []) == ""

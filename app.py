@@ -89,6 +89,104 @@ def _basic_memory_api():
     return MemoryAPI(SupabaseMemoryRepository(create_client(url, key)))
 
 
+def _retrieve_chat_memories(memory_context, memory_api, query: str):
+    """Use the existing semantic memory layer for response-time retrieval."""
+    from memory import IntelligentMemory
+
+    scored = IntelligentMemory(memory_api).retrieve_semantic(
+        memory_context,
+        query,
+        session_id=memory_context.session_id,
+        limit=5,
+        min_similarity=0.05,
+    )
+    return [item.record for item in scored]
+
+
+def _retrieve_stable_chat_memories(memory_context, memory_api, limit: int = 12):
+    """Select a bounded, deterministic profile/project context from canonical memory."""
+    from memory import MemoryCategory, MemoryDomain
+
+    if limit <= 0:
+        return []
+
+    stable_categories = (
+        MemoryCategory.PROFILE,
+        MemoryCategory.PREFERENCE,
+        MemoryCategory.INTEREST,
+        MemoryCategory.GOAL,
+        MemoryCategory.PROJECT,
+    )
+    records = memory_api.retrieve(
+        memory_context,
+        MemoryDomain.BOSS_PERSONAL.value,
+        limit=100,
+    )
+    active_records = [
+        record for record in records
+        if record.active
+        and record.category in stable_categories
+        and not (
+            isinstance(record.content, dict)
+            and record.content.get("lifecycle_state") in {"SUPERSEDED", "OBSOLETE", "INACTIVE"}
+        )
+        and not (
+            isinstance(record.content, dict)
+            and record.content.get("evolution_state") == "historical"
+        )
+    ]
+
+    selected = []
+    for category in stable_categories:
+        category_records = [
+            record for record in active_records if record.category is category
+        ]
+        category_records.sort(
+            key=lambda record: (
+                -_memory_importance(record),
+                -record.updated_at.timestamp(),
+                record.memory_id,
+            )
+        )
+        selected.extend(category_records[:3])
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
+
+
+def _memory_text(record) -> str:
+    content = record.content
+    if isinstance(content, dict):
+        content = content.get("text", content.get("content", ""))
+    return content.strip() if isinstance(content, str) else ""
+
+
+def _memory_importance(record) -> float:
+    if not isinstance(record.content, dict):
+        return 0.5
+    try:
+        return max(0.0, min(1.0, float(record.content.get("importance", 0.5))))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _build_chat_memory_instruction(stable_memories, relevant_memories) -> str:
+    """Format bounded stable and query-relevant memories without duplicate records."""
+    stable_ids = {record.memory_id for record in stable_memories}
+    stable_lines = [f"- {_memory_text(record)}" for record in stable_memories if _memory_text(record)]
+    relevant_lines = [
+        f"- {_memory_text(record)}"
+        for record in relevant_memories
+        if record.memory_id not in stable_ids and _memory_text(record)
+    ]
+    sections = []
+    if stable_lines:
+        sections.append("Stable user context:\n" + "\n".join(stable_lines))
+    if relevant_lines:
+        sections.append("Relevant memories:\n" + "\n".join(relevant_lines))
+    return "\n\n".join(sections)
+
+
 def _memory_category(message: str):
     lower = message.lower()
     if "my name is" in lower or "call me" in lower:
@@ -217,6 +315,31 @@ app.add_middleware(
 )
 
 # =========================
+# AUTOMATION AGENT GATEWAY
+# =========================
+_agent_gateway_instance: Optional[Any] = None
+_agent_transport_manager_instance: Optional[Any] = None
+
+
+def get_agent_gateway():
+    global _agent_gateway_instance
+    if _agent_gateway_instance is None:
+        from automation import AgentGateway
+        _agent_gateway_instance = AgentGateway()
+    return _agent_gateway_instance
+
+
+try:
+    from automation import create_agent_transport_api
+    _agent_gw = get_agent_gateway()
+    _agent_router, _agent_tm = create_agent_transport_api(_agent_gw)
+    _agent_transport_manager_instance = _agent_tm
+    app.include_router(_agent_router)
+    logger.info("Automation Agent WebSocket router mounted at /ws/agents/{agent_id}")
+except ImportError as exc:
+    logger.warning(f"Automation layer not available: {exc}")
+
+# =========================
 # REQUEST/RESPONSE MODELS
 # =========================
 
@@ -265,6 +388,7 @@ class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
     session_id: Optional[str] = None
+    messages: Optional[List[Dict[str, str]]] = None
 
 
 class ChatResponse(BaseModel):
@@ -694,23 +818,27 @@ async def chat(request: ChatRequest, http_request: Request):
         memory_api = None
         memory_context = None
         memories = []
+        stable_memories = []
         try:
             memory_context = _basic_memory_context(request.session_id)
             memory_api = _basic_memory_api()
-            from memory import ContextualMemory
-            memories = ContextualMemory(memory_api).select(
-                memory_context, request.message, session_id=memory_context.session_id, limit=5,
+            stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
+            memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
+            logger.info(
+                "Chat memory retrieval: stable=%d relevant=%d",
+                len(stable_memories),
+                len(memories),
             )
         except Exception as memory_error:
             memories = []
-            logger.warning("Basic memory load unavailable: %s", memory_error)
-
-        retrieved_context = ""
-        if memories:
-            retrieved_context = "\n".join(
-                f"- {item.content.get('text', item.content) if isinstance(item.content, dict) else item.content}"
-                for item in memories if item.content
+            stable_memories = []
+            logger.warning(
+                "Chat memory retrieval unavailable: %s: %s",
+                type(memory_error).__name__,
+                memory_error,
             )
+
+        retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
 
         # Read personality from environment (keep existing prompts unchanged)
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
@@ -722,13 +850,18 @@ async def chat(request: ChatRequest, http_request: Request):
         base_system = VENNELA_PROMPT or SYSTEM_PROMPT or ""
 
         # Combine base system instruction with personality (if any)
-        memory_instruction = (
-            "Relevant durable user memories:\n" + retrieved_context
-            if retrieved_context else ""
-        )
+        memory_instruction = retrieved_context
         combined_system_instruction = "\n\n".join(
             s for s in (base_system, VENNELA_PERSONALITY, memory_instruction) if s
         )
+
+        # Preserve client-supplied ordered history while remaining compatible with single-turn clients.
+        conversation_messages = list(request.messages or [])
+        if not conversation_messages or not any(
+            message.get("role") == "user" and message.get("content") == request.message
+            for message in conversation_messages
+        ):
+            conversation_messages.append({"role": "user", "content": request.message})
 
         # 3. Apply Conversation Adjuster Policy (Concise by default, detailed when requested)
         adjuster = get_conversation_adjuster()
@@ -743,6 +876,7 @@ async def chat(request: ChatRequest, http_request: Request):
             result = adapter.route_text(
                 request.message,
                 system_instruction=policy.system_instruction,
+                messages=conversation_messages,
                 latency_sensitive=policy.latency_sensitive,
                 max_tokens=policy.max_tokens,
                 task_hint=policy.task_hint,
@@ -801,29 +935,35 @@ async def chat_stream(request: ChatRequest, http_request: Request):
         try:
             memory_context = _basic_memory_context(request.session_id)
             memory_api = _basic_memory_api()
-            from memory import ContextualMemory
-            memories = ContextualMemory(memory_api).select(
-                memory_context, request.message, session_id=memory_context.session_id, limit=5,
+            stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
+            memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
+            logger.info(
+                "Streaming memory retrieval: stable=%d relevant=%d",
+                len(stable_memories),
+                len(memories),
             )
-            if memories:
-                retrieved_context = "\n".join(
-                    f"- {item.content.get('text', item.content) if isinstance(item.content, dict) else item.content}"
-                    for item in memories if item.content
-                )
+            retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
         except Exception as memory_error:
-            logger.warning("Basic memory load unavailable: %s", memory_error)
+            logger.warning(
+                "Streaming memory retrieval unavailable: %s: %s",
+                type(memory_error).__name__,
+                memory_error,
+            )
 
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
         VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", "")
         SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "")
         base_system = VENNELA_PROMPT or SYSTEM_PROMPT or ""
-        memory_instruction = (
-            "Relevant durable user memories:\n" + retrieved_context
-            if retrieved_context else ""
-        )
+        memory_instruction = retrieved_context
         combined_system_instruction = "\n\n".join(
             s for s in (base_system, VENNELA_PERSONALITY, memory_instruction) if s
         )
+        conversation_messages = list(request.messages or [])
+        if not conversation_messages or not any(
+            message.get("role") == "user" and message.get("content") == request.message
+            for message in conversation_messages
+        ):
+            conversation_messages.append({"role": "user", "content": request.message})
 
         adjuster = get_conversation_adjuster()
         policy = adjuster.adjust(
@@ -838,6 +978,7 @@ async def chat_stream(request: ChatRequest, http_request: Request):
                 for token in adapter.stream_text(
                     request.message,
                     system_instruction=policy.system_instruction,
+                    messages=conversation_messages,
                     latency_sensitive=policy.latency_sensitive,
                     max_tokens=policy.max_tokens,
                 ):
