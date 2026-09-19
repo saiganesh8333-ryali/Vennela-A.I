@@ -7,10 +7,12 @@ This is the main entry point for Render deployment.
 
 import os
 import sys
+import re
+from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import logging
 
@@ -389,10 +391,42 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     session_id: Optional[str] = None
     messages: Optional[List[Dict[str, str]]] = None
+    request_id: Optional[str] = None
+
+
+class DeviceRef(BaseModel):
+    kind: str
+    id: str
+
+
+class AgentActionResponse(BaseModel):
+    protocol_version: str = "1.0"
+    request_id: str
+    device: DeviceRef
+    type: str
+    args: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ActionError(BaseModel):
+    code: str
+    message: str
+    retryable: bool = False
+
+
+class ActionResultResponse(BaseModel):
+    protocol_version: str = "1.0"
+    request_id: str
+    success: bool
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[ActionError] = None
 
 
 class ChatResponse(BaseModel):
     response: str
+    request_id: str
+    actions: List[AgentActionResponse] = Field(default_factory=list)
+    action_results: List[ActionResultResponse] = Field(default_factory=list)
 
 
 class TaskCreateRequest(BaseModel):
@@ -424,6 +458,85 @@ class ReminderCreateRequest(BaseModel):
     timezone: Optional[str] = None
     task_id: Optional[str] = None
     user_id: Optional[str] = None
+
+
+_PC_APP_ALIASES = {
+    "notepad": "notepad",
+    "calculator": "calculator",
+    "chrome": "chrome",
+    "google chrome": "chrome",
+    "edge": "edge",
+    "microsoft edge": "edge",
+    "explorer": "explorer",
+    "file explorer": "explorer",
+    "settings": "settings",
+    "vs code": "vs code",
+    "visual studio code": "vs code",
+}
+
+
+def _chat_request_id(request_id: Optional[str]) -> str:
+    if request_id:
+        try:
+            return str(UUID(request_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="request_id must be a valid UUID")
+    return str(uuid4())
+
+
+def _pc_action_for_message(message: str) -> tuple[Optional[AgentActionResponse], Optional[ActionResultResponse]]:
+    """Recognize only explicit, supported PC intents; ordinary text stays text-only."""
+    normalized = " ".join(re.sub(r"[?.!]+$", "", message.lower().strip()).split())
+    action_request_id = str(uuid4())
+    device = DeviceRef(kind="pc", id="local-pc")
+
+    if re.search(r"\b(open|launch|start)\s+([a-z0-9 ._-]+)$", normalized):
+        target = re.sub(r"^(open|launch|start)\s+", "", normalized).strip()
+        app = _PC_APP_ALIASES.get(target)
+        if app is None:
+            return None, ActionResultResponse(
+                request_id=action_request_id,
+                success=False,
+                error=ActionError(
+                    code="APP_NOT_ALLOWED",
+                    message="The requested application is not in the PC Agent allowlist.",
+                ),
+            )
+        return AgentActionResponse(
+            request_id=action_request_id,
+            device=device,
+            type="OPEN_APP",
+            args={"app": app},
+        ), None
+
+    if re.search(r"\b(close|quit|stop)\s+([a-z0-9 ._-]+)$", normalized):
+        target = re.sub(r"^(close|quit|stop)\s+", "", normalized).strip()
+        app = _PC_APP_ALIASES.get(target)
+        if app is None:
+            return None, ActionResultResponse(
+                request_id=action_request_id,
+                success=False,
+                error=ActionError(
+                    code="APP_NOT_ALLOWED",
+                    message="The requested application is not in the PC Agent allowlist.",
+                ),
+            )
+        return AgentActionResponse(
+            request_id=action_request_id,
+            device=device,
+            type="CLOSE_APP",
+            args={"app": app},
+        ), None
+
+    if re.search(r"\b(?:what\s+time\s+is\s+it|what(?:'s| is)\s+the\s+time)\s+on\s+my\s+pc\b", normalized):
+        return AgentActionResponse(request_id=action_request_id, device=device, type="GET_PC_TIME"), None
+    if re.search(r"\b(?:what(?:'s| is)\s+)?my\s+pc\s+battery\b|\bbattery\s+status\s+on\s+my\s+pc\b", normalized):
+        return AgentActionResponse(request_id=action_request_id, device=device, type="GET_BATTERY"), None
+    if re.search(r"\b(?:show|get|what(?:'s| is))\s+(?:my\s+)?active\s+window\b", normalized):
+        return AgentActionResponse(request_id=action_request_id, device=device, type="GET_ACTIVE_WINDOW"), None
+    if re.search(r"\b(?:show|get|what(?:'s| is))\s+(?:my\s+)?pc\s+system\s+info\b", normalized):
+        return AgentActionResponse(request_id=action_request_id, device=device, type="GET_SYSTEM_INFO"), None
+    return None, None
 
 
 # =========================
@@ -803,6 +916,29 @@ async def cancel_reminder(reminder_id: str, user_id: Optional[str] = None):
 async def chat(request: ChatRequest, http_request: Request):
     """Chat with Vennela AI via NEXUS intent router, Conversation Adjuster, and LLM Router."""
     try:
+        chat_request_id = _chat_request_id(request.request_id)
+        pc_action, action_result = _pc_action_for_message(request.message)
+        if pc_action is not None:
+            action_text = {
+                "OPEN_APP": f"Opening {pc_action.args.get('app')}, Boss.",
+                "CLOSE_APP": f"Closing {pc_action.args.get('app')}, Boss.",
+                "GET_PC_TIME": "Checking the time on your PC, Boss.",
+                "GET_BATTERY": "Checking your PC battery, Boss.",
+                "GET_ACTIVE_WINDOW": "Checking your active window, Boss.",
+                "GET_SYSTEM_INFO": "Checking your PC system information, Boss.",
+            }[pc_action.type]
+            return ChatResponse(
+                request_id=chat_request_id,
+                response=action_text,
+                actions=[pc_action],
+            )
+        if action_result is not None:
+            return ChatResponse(
+                request_id=chat_request_id,
+                response="I couldn't complete that PC action.",
+                action_results=[action_result],
+            )
+
         # 1. Check for deterministic Temporal / Task / Reminder intent via NEXUS
         from core.nexus_intent import NexusIntentClassifier, execute_nexus_intent
         temporal = get_temporal_context()
@@ -812,7 +948,7 @@ async def chat(request: ChatRequest, http_request: Request):
             task_mgr = get_task_manager()
             rem_mgr = get_reminder_manager()
             action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
-            return ChatResponse(response=action_resp)
+            return ChatResponse(response=action_resp, request_id=chat_request_id)
 
         # 2. Memory is always scoped to the server-configured Boss identity.
         memory_api = None
@@ -895,7 +1031,7 @@ async def chat(request: ChatRequest, http_request: Request):
                 except Exception as store_err:
                     logger.warning("SmartMemory store warning: %s", store_err)
 
-            return ChatResponse(response=text)
+            return ChatResponse(response=text, request_id=chat_request_id)
 
         except RoutingError as exc:
             logger.error(f"[LLMRouter] Routing failure [{getattr(exc.failure, 'kind', 'ERROR')}]: {exc}")
