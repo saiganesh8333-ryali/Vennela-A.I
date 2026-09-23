@@ -30,6 +30,7 @@ except ImportError as exc:
 
 _llm_adapter_instance: Optional[Any] = None
 _conversation_adjuster_instance: Optional[Any] = None
+_brain_instance: Optional[Any] = None
 
 
 def get_llm_adapter() -> Any:
@@ -48,6 +49,25 @@ def get_conversation_adjuster() -> Any:
             raise RuntimeError("ConversationAdjuster is not available")
         _conversation_adjuster_instance = ConversationAdjuster()
     return _conversation_adjuster_instance
+
+
+def get_brain() -> Any:
+    """Build the Central Brain once, sharing the production router adapter."""
+    global _brain_instance
+    if _brain_instance is None:
+        from agents import AgentOrchestrator, AgentRegistry, VennelaBrain, VennelaReasoningAdapter
+        from agents.web_hunt import WebHuntAgent
+
+        registry = AgentRegistry()
+        registry.register(WebHuntAgent())
+        _brain_instance = VennelaBrain(
+            orchestrator=AgentOrchestrator(registry),
+            reasoning=VennelaReasoningAdapter(
+                adapter=get_llm_adapter(),
+                adjuster=get_conversation_adjuster(),
+            ),
+        )
+    return _brain_instance
 
 # =========================
 # CONFIGURATION
@@ -909,12 +929,12 @@ async def cancel_reminder(reminder_id: str, user_id: Optional[str] = None):
 
 
 # =========================
-# CHAT ENDPOINTS (NEXUS INTEGRATED)
+# CHAT ENDPOINTS
 # =========================
 
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(request: ChatRequest, http_request: Request):
-    """Chat with Vennela AI via NEXUS intent router, Conversation Adjuster, and LLM Router."""
+    """Chat with Vennela AI through the Central Brain and production memory."""
     try:
         chat_request_id = _chat_request_id(request.request_id)
         pc_action, action_result = _pc_action_for_message(request.message)
@@ -999,25 +1019,33 @@ async def chat(request: ChatRequest, http_request: Request):
         ):
             conversation_messages.append({"role": "user", "content": request.message})
 
-        # 3. Apply Conversation Adjuster Policy (Concise by default, detailed when requested)
+        # Preserve the existing response policy before entering the Brain boundary.
         adjuster = get_conversation_adjuster()
         policy = adjuster.adjust(
             request.message,
             user_system_instruction=combined_system_instruction or None,
         )
 
-        # 4. Route via VennelaLLMAdapter to Frozen LLM Router V1
-        adapter = get_llm_adapter()
         try:
-            result = adapter.route_text(
+            brain = get_brain()
+            brain_result = await brain.process(
                 request.message,
-                system_instruction=policy.system_instruction,
+                request_id=chat_request_id,
                 messages=conversation_messages,
-                latency_sensitive=policy.latency_sensitive,
-                max_tokens=policy.max_tokens,
-                task_hint=policy.task_hint,
+                context={"_system_instruction": policy.system_instruction},
             )
-            text = result.get("text", "")
+            if brain_result.status == "failed" or not brain_result.response:
+                error = brain_result.error or {}
+                logger.error(
+                    "Brain request failed: code=%s stage=%s",
+                    error.get("code", "BRAIN_FAILURE"),
+                    error.get("stage", "brain"),
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="AI services temporarily unavailable. Please try again later.",
+                )
+            text = brain_result.response
 
             # 5. Store to Smart Memory if configured
             if memory_api is not None and memory_context is not None:

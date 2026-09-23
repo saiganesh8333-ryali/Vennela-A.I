@@ -62,9 +62,52 @@ class LLMRouter:
         if "vision" in request.requirements or any(w in lower for w in ("image", "photo", "screenshot", "vision")):
             return TaskType.MULTIMODAL
 
-        coding_keywords = ("code", "function", "class ", "def ", "bug", "python", "javascript", "typescript", "refactor", "sql", "api", "git")
+        coding_keywords = (
+            "code",
+            "function",
+            "class ",
+            "def ",
+            "bug",
+            "javascript",
+            "typescript",
+            "refactor",
+            "sql",
+            "api",
+            "git",
+            "implementation",
+            "implement",
+            "script",
+            "program",
+        )
+        explanatory_markers = (
+            "explain",
+            "what is",
+            "what are",
+            "how does",
+            "why does",
+            "concept",
+        )
+        implementation_markers = (
+            "write",
+            "implement",
+            "create",
+            "build",
+            "code",
+            "script",
+            "program",
+            "function",
+            "class ",
+            "def ",
+            "refactor",
+            "debug",
+        )
         if "coding" in request.requirements or any(k in lower for k in coding_keywords):
-            return TaskType.CODING
+            if (
+                "python" not in lower
+                or any(marker in lower for marker in implementation_markers)
+                or not any(marker in lower for marker in explanatory_markers)
+            ):
+                return TaskType.CODING
 
         reasoning_keywords = ("prove", "derive", "step by step", "deep reasoning", "theorem", "math", "deduce", "trade-off", "architecture")
         if "reasoning" in request.requirements or any(k in lower for k in reasoning_keywords):

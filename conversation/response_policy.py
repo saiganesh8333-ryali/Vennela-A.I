@@ -138,7 +138,6 @@ class ConversationAdjuster:
                 system_instruction=base_instruction,
                 max_tokens=kwargs.get("max_tokens", self.default_max_tokens_detailed),
                 latency_sensitive=latency_sensitive,
-                task_hint="DEEP_REASONING",
             )
 
         # 2. Action confirmation or status check
@@ -151,7 +150,6 @@ class ConversationAdjuster:
                 system_instruction=base_instruction,
                 max_tokens=kwargs.get("max_tokens", 80),
                 latency_sensitive=True,
-                task_hint="TINY_TASK",
             )
 
         # 3. Explicit concise request
@@ -164,7 +162,6 @@ class ConversationAdjuster:
                 system_instruction=base_instruction,
                 max_tokens=kwargs.get("max_tokens", self.default_max_tokens_concise),
                 latency_sensitive=latency_sensitive,
-                task_hint="CONVERSATION",
             )
 
         # 4. Normal conversation: preserve the authoritative system instruction.
@@ -173,5 +170,4 @@ class ConversationAdjuster:
             system_instruction=user_system_instruction or "",
             max_tokens=kwargs.get("max_tokens"),
             latency_sensitive=latency_sensitive,
-            task_hint="CONVERSATION",
         )
