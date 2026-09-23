@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from realtime.api import create_realtime_api
+from vennela_realtime.api import create_realtime_api
 
 
 class FakeLiveSession:

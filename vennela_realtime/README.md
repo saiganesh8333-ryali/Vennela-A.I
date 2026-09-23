@@ -1,4 +1,4 @@
-# Gemini Live proxy
+# Vennela Gemini Live proxy
 
 The backend exposes `wss://<host>/ws/gemini/live`. Clients must send an
 `Authorization: Bearer <VENNELA_REALTIME_TOKEN>` header. If that variable is
