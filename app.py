@@ -361,6 +361,14 @@ try:
 except ImportError as exc:
     logger.warning(f"Automation layer not available: {exc}")
 
+try:
+    from realtime import create_realtime_api
+
+    app.include_router(create_realtime_api())
+    logger.info("Gemini Live WebSocket router mounted at /ws/gemini/live")
+except ImportError as exc:
+    logger.warning(f"Realtime layer not available: {exc}")
+
 # =========================
 # REQUEST/RESPONSE MODELS
 # =========================
