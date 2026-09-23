@@ -8,6 +8,7 @@ import binascii
 import json
 import logging
 import os
+import re
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 512 * 1024
 MAX_SESSION_ID_LENGTH = 128
 MAX_USER_ID_LENGTH = 256
+_HEX_SIGNATURE = re.compile(r"^[0-9a-fA-F]+$")
+_BASE64_SIGNATURE = re.compile(r"^[A-Za-z0-9_-]*={0,2}$")
 
 
 def _field(value: Any, *names: str) -> Any:
@@ -67,6 +70,77 @@ def _tool_declarations() -> list[dict[str, Any]]:
     ]
 
 
+def _thought_signature_bytes(value: Any) -> bytes:
+    """Convert persisted thought-signature data to the SDK's required bytes."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized and len(normalized) % 2 == 0 and _HEX_SIGNATURE.fullmatch(normalized):
+            return bytes.fromhex(normalized)
+        try:
+            if not _BASE64_SIGNATURE.fullmatch(normalized):
+                raise ValueError("invalid encoded bytes")
+            unpadded = normalized.rstrip("=")
+            if len(unpadded) % 4 == 1:
+                raise ValueError("invalid encoded bytes length")
+            padded = unpadded + "=" * (-len(unpadded) % 4)
+            decoded = base64.b64decode(
+                padded.replace("-", "+").replace("_", "/"),
+                validate=True,
+            )
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("thought_signature must be SDK bytes or valid encoded bytes") from exc
+        if not decoded:
+            raise ValueError("thought_signature must not be empty")
+        return decoded
+    raise TypeError("thought_signature must be SDK bytes or an encoded string")
+
+
+def _content_for_gemini(value: Any, types: Any) -> Any:
+    """Rehydrate history with SDK-native Parts while keeping signatures transient."""
+    if isinstance(value, types.Content):
+        parts = [
+            types.Part(
+                **{
+                    **part.model_dump(exclude_none=True),
+                    **(
+                        {
+                            "thought_signature": _thought_signature_bytes(
+                                part.thought_signature
+                            )
+                        }
+                        if part.thought_signature is not None
+                        else {}
+                    ),
+                }
+            )
+            for part in (value.parts or [])
+        ]
+        return types.Content(role=value.role, parts=parts)
+    if not isinstance(value, dict):
+        raise TypeError("Gemini history content must be an SDK Content or mapping")
+
+    parts = []
+    for raw_part in value.get("parts") or []:
+        if not isinstance(raw_part, dict):
+            raise TypeError("Gemini history parts must be mappings")
+        part = dict(raw_part)
+        signature_key = (
+            "thought_signature"
+            if "thought_signature" in part
+            else "thoughtSignature"
+            if "thoughtSignature" in part
+            else None
+        )
+        if signature_key is not None:
+            part["thought_signature"] = _thought_signature_bytes(part.pop(signature_key))
+        parts.append(types.Part(**part))
+    return types.Content(role=value.get("role"), parts=parts)
+
+
 class RealtimeConfigurationError(RuntimeError):
     """Raised when the server cannot create a secure upstream session."""
 
@@ -112,9 +186,28 @@ class GeminiLiveSession:
 
     async def send_text(self, text: str) -> None:
         await self._session.send_client_content(
-            turns={"role": "user", "parts": [{"text": text}]},
+            turns=self._content_for_gemini(
+                {"role": "user", "parts": [{"text": text}]}, self._types
+            ),
             turn_complete=True,
         )
+
+    async def send_history(self, turns: Any) -> None:
+        """Send rehydrated history without treating transient metadata as text."""
+        if isinstance(turns, list):
+            normalized = [
+                self._content_for_gemini(turn, self._types) for turn in turns
+            ]
+        else:
+            normalized = self._content_for_gemini(turns, self._types)
+        await self._session.send_client_content(
+            turns=normalized,
+            turn_complete=True,
+        )
+
+    @staticmethod
+    def _content_for_gemini(value: Any, types: Any) -> Any:
+        return _content_for_gemini(value, types)
 
     async def send_tool_result(
         self, call_id: str, name: str, result: dict[str, Any]
