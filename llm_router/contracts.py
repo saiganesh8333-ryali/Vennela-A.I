@@ -52,6 +52,22 @@ class FailureKind(str, Enum):
     UNKNOWN = "unknown"
 
 
+FAILURE_CODES = {
+    FailureKind.AUTHENTICATION: "AUTH_ERROR",
+    FailureKind.NO_API_KEY: "CONFIG_ERROR",
+    FailureKind.RATE_LIMIT: "RATE_LIMIT_ERROR",
+    FailureKind.TIMEOUT: "TIMEOUT_ERROR",
+    FailureKind.NETWORK: "PROVIDER_ERROR",
+    FailureKind.SERVER: "PROVIDER_ERROR",
+    FailureKind.INVALID_REQUEST: "VALIDATION_ERROR",
+    FailureKind.CONTEXT_LIMIT: "VALIDATION_ERROR",
+    FailureKind.MODEL_UNAVAILABLE: "PROVIDER_ERROR",
+    FailureKind.MALFORMED_RESPONSE: "PROVIDER_ERROR",
+    FailureKind.CIRCUIT_OPEN: "FALLBACK_ERROR",
+    FailureKind.UNKNOWN: "ROUTER_ERROR",
+}
+
+
 @dataclass(frozen=True)
 class Failure:
     kind: FailureKind

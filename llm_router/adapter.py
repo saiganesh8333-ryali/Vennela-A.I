@@ -36,6 +36,7 @@ class VennelaLLMAdapter:
         temperature: float | None = None,
         max_tokens: int | None = None,
         task_hint: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Simple text generation for Vennela backend callers."""
         request_messages = self._build_messages(prompt, system_instruction, messages)
@@ -48,6 +49,7 @@ class VennelaLLMAdapter:
             structured_output=structured_output,
             temperature=temperature,
             max_tokens=max_tokens,
+            metadata={"request_id": request_id} if request_id else {},
         )
 
         response = self.router.generate(req)
@@ -78,6 +80,7 @@ class VennelaLLMAdapter:
         latency_sensitive: bool = False,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        request_id: str | None = None,
     ) -> Iterator[str]:
         """Streaming text token generator for Vennela UI / agents."""
         request_messages = self._build_messages(prompt, system_instruction, messages)
@@ -89,6 +92,7 @@ class VennelaLLMAdapter:
             streaming=True,
             temperature=temperature,
             max_tokens=max_tokens,
+            metadata={"request_id": request_id} if request_id else {},
         )
 
         for chunk in self.router.stream(req):

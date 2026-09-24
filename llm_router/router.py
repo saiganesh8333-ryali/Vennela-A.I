@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import Any, Iterator, Sequence
 
 from .config import RouterConfig
@@ -21,6 +22,7 @@ from .health import HealthRegistry
 from .performance import LatencyTracker
 from .providers.base import BaseLLMProvider
 from .registry import ModelProfile, ModelRegistry, ModelTier, default_model_registry
+from observability import log_event, log_failure
 
 
 class LLMRouter:
@@ -215,15 +217,47 @@ class LLMRouter:
 
     def generate(self, request: LLMRequest) -> LLMResponse:
         """Standard non-streaming generation."""
+        started = time.perf_counter()
+        request_id = request.metadata.get("request_id")
+        log_event("router", "selection_started", request_id=request_id)
         tracker = LatencyTracker()
         tracker.start_decision()
 
         task_type = self.infer_task_type(request)
         candidates = self.build_candidate_chain(request, task_type)
+        log_event(
+            "classifier",
+            "task_classified",
+            request_id=request_id,
+            task=task_type.value,
+            candidates=len(candidates),
+        )
 
         tracker.end_decision()
 
-        resp, _ = self.fallback.execute_completion(request, candidates, tracker)
+        try:
+            resp, _ = self.fallback.execute_completion(request, candidates, tracker)
+        except RoutingError as exc:
+            log_failure(
+                "router",
+                "generation_failed",
+                exc,
+                request_id=request_id,
+                error_kind=exc.failure.kind.value,
+                provider=exc.failure.provider,
+                model=exc.failure.model_id,
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+            raise
+        log_event(
+            "router",
+            "primary_or_fallback_success",
+            request_id=request_id,
+            provider=resp.provider,
+            model=resp.model_id,
+            fallback=resp.fallback_used,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
         metrics = tracker.complete()
 
         meta = dict(resp.metadata)

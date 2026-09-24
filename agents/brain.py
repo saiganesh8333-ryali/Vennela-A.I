@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from web_intelligence.models import ResearchResult
 from web_intelligence.telemetry import log_error, log_info, sanitize
+from llm_router.contracts import FAILURE_CODES, RoutingError
 
 from .models import DelegationDecision, DelegationType
 from .orchestrator import AgentOrchestrator
@@ -224,7 +225,20 @@ class VennelaBrain:
         if self.reasoning is None:
             return None
         try:
-            return self.reasoning.respond(task, messages=messages, context=context)
+            reasoning_context = dict(context or {})
+            reasoning_context["_request_id"] = request_id
+            return self.reasoning.respond(task, messages=messages, context=reasoning_context)
+        except RoutingError as exc:
+            failure = exc.failure
+            return self._failure(
+                task,
+                request_id,
+                FAILURE_CODES.get(failure.kind, "ROUTER_ERROR"),
+                failure.message,
+                started,
+                stage="router",
+                metadata={"failure": failure.safe_dict()},
+            )
         except Exception as exc:
             return self._failure(
                 task, request_id, "REASONING_FAILURE", sanitize(str(exc)) or "Reasoning failed.",
@@ -263,6 +277,7 @@ class VennelaBrain:
         stage: str,
         capability: str | None = None,
         decision: DelegationType | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> BrainResult:
         log_error("brain.failed", request_id=request_id, stage=stage, code=code, error=message)
         return BrainResult(
@@ -277,7 +292,7 @@ class VennelaBrain:
                 "stage": stage,
                 "retryable": code in {"TIMEOUT", "ORCHESTRATOR_FAILURE"},
             },
-            metadata={"stage": stage},
+            metadata={"stage": stage, **dict(metadata or {})},
             duration_ms=cls._duration(started),
         )
 

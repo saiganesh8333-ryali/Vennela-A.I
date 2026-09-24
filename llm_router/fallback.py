@@ -19,6 +19,7 @@ from .contracts import (
 from .health import HealthRegistry
 from .performance import LatencyTracker
 from .providers.base import BaseLLMProvider
+from observability import log_event, log_failure
 
 
 class FallbackEngine:
@@ -101,11 +102,29 @@ class FallbackEngine:
                 tracker.start_fallback()
 
             attempt_start = time.perf_counter()
+            request_id = request.metadata.get("request_id")
+            log_event(
+                "provider",
+                "request_started",
+                request_id=request_id,
+                provider=provider_name,
+                model=model_id,
+                fallback=bool(attempts),
+            )
             try:
                 response = provider.complete(request, model_id)
                 attempt_latency = (time.perf_counter() - attempt_start) * 1000.0
 
                 self.health.record_success(provider_name, attempt_latency, model_id)
+                log_event(
+                    "provider",
+                    "response_received",
+                    request_id=request_id,
+                    provider=provider_name,
+                    model=model_id,
+                    status=200,
+                    duration_ms=round(attempt_latency, 2),
+                )
                 attempts.append(Attempt(model_id=model_id, provider=provider_name, latency_ms=attempt_latency))
 
                 if tracker:
@@ -132,6 +151,17 @@ class FallbackEngine:
                 attempts.append(Attempt(model_id=model_id, provider=provider_name, latency_ms=attempt_latency, failure=exc.failure))
 
                 self.health.record_failure(provider_name, exc.failure.kind, model_id, reason=exc.failure.message)
+                log_failure(
+                    "provider",
+                    "request_failed",
+                    exc,
+                    request_id=request_id,
+                    provider=provider_name,
+                    model=model_id,
+                    status_code=exc.failure.status_code,
+                    error_kind=exc.failure.kind.value,
+                    duration_ms=round(attempt_latency, 2),
+                )
 
                 if exc.failure.kind in {
                     FailureKind.AUTHENTICATION,

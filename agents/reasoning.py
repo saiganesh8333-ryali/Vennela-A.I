@@ -66,14 +66,16 @@ class VennelaReasoningAdapter:
     ) -> ReasoningResponse:
         user_system_instruction = None
         reasoning_context = context
+        request_id = None
         if context:
             candidate = context.get("_system_instruction")
             if isinstance(candidate, str) and candidate.strip():
                 user_system_instruction = candidate
+            request_id = context.get("_request_id")
             reasoning_context = {
                 key: value
                 for key, value in context.items()
-                if key != "_system_instruction"
+                if key not in {"_system_instruction", "_request_id"}
             }
 
         policy = self.adjuster.adjust(
@@ -92,6 +94,7 @@ class VennelaReasoningAdapter:
             latency_sensitive=policy.latency_sensitive,
             max_tokens=policy.max_tokens,
             task_hint=policy.task_hint,
+            request_id=request_id,
         )
         return ReasoningResponse(
             raw["text"],

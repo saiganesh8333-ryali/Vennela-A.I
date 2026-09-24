@@ -9,6 +9,8 @@ from app import app
 from llm_router.adapter import VennelaLLMAdapter
 from llm_router.gateway import Gateway
 from llm_router.providers.mock import MockProvider
+from llm_router.providers.mock import MockMode
+from llm_router.registry import ModelProfile, ModelRegistry, ModelTier
 from memory.models import MemoryCategory
 
 
@@ -161,3 +163,76 @@ def test_chat_missing_session_id_preserves_existing_contract(chat_client):
 
     assert response.status_code == 200
     assert response.json()["response"] == "direct response"
+
+
+def test_chat_provider_503_uses_fallback_and_preserves_request_id(monkeypatch):
+    import app as app_module
+
+    primary = MockProvider("groq", "primary", failures=[MockMode.SERVER_ERROR_500])
+    fallback = MockProvider("openrouter", "fallback")
+    registry = ModelRegistry(
+        [
+            ModelProfile(
+                "primary", "groq", tier=ModelTier.GENERAL, quality_score=1.0,
+                conversation_strength=1.0, latency_ms=100,
+            ),
+            ModelProfile(
+                "fallback", "openrouter", tier=ModelTier.GENERAL, quality_score=0.8,
+                conversation_strength=0.8, latency_ms=200,
+            ),
+        ]
+    )
+    adapter = VennelaLLMAdapter(
+        router=Gateway.create(
+            custom_providers={"groq": primary, "openrouter": fallback},
+            registry=registry,
+        ).router
+    )
+    monkeypatch.setattr(app_module, "_llm_adapter_instance", adapter)
+    monkeypatch.setattr(app_module, "_brain_instance", None)
+    monkeypatch.setattr(
+        app_module,
+        "_basic_memory_api",
+        lambda: (_ for _ in ()).throw(RuntimeError("memory unavailable in test")),
+    )
+
+    response = TestClient(app).post(
+        "/chat",
+        headers={"X-Request-ID": "header-request-id"},
+        json={"message": "Hello Vennela"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "header-request-id"
+    assert response.json()["response"] == "fallback"
+
+
+def test_chat_unrecoverable_provider_failure_has_deliberate_503(monkeypatch):
+    import app as app_module
+
+    primary = MockProvider(
+        "openrouter",
+        "primary",
+        failures=[MockMode.SERVER_ERROR_500] * 3,
+    )
+    groq = MockProvider("groq", "groq", failures=[MockMode.SERVER_ERROR_500] * 3)
+    monkeypatch.setattr(
+        app_module,
+        "_llm_adapter_instance",
+        VennelaLLMAdapter(
+            router=Gateway.create(
+                custom_providers={"openrouter": primary, "groq": groq}
+            ).router
+        ),
+    )
+    monkeypatch.setattr(app_module, "_brain_instance", None)
+    monkeypatch.setattr(
+        app_module,
+        "_basic_memory_api",
+        lambda: (_ for _ in ()).throw(RuntimeError("memory unavailable in test")),
+    )
+
+    response = TestClient(app).post("/chat", json={"message": "Hello Vennela"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "AI services temporarily unavailable. Please try again later."

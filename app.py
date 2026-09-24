@@ -11,10 +11,12 @@ import re
 from uuid import UUID, uuid4
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import logging
+import time
+from observability import log_event, log_failure
 
 try:
     from llm_router.adapter import VennelaLLMAdapter
@@ -327,6 +329,34 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+@app.middleware("http")
+async def request_observability(request: Request, call_next):
+    started = time.perf_counter()
+    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    request.state.request_id = request_id
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        log_event(
+            "response",
+            f"{request.method} {request.url.path}",
+            request_id=request_id,
+            status=response.status_code,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        return response
+    except Exception as exc:
+        log_failure(
+            "response",
+            f"{request.method} {request.url.path}",
+            exc,
+            request_id=request_id,
+            status=500,
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        raise
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -503,13 +533,27 @@ _PC_APP_ALIASES = {
 }
 
 
-def _chat_request_id(request_id: Optional[str]) -> str:
+def _chat_request_id(request_id: Optional[str], fallback: str | None = None) -> str:
     if request_id:
         try:
             return str(UUID(request_id))
         except ValueError:
             raise HTTPException(status_code=400, detail="request_id must be a valid UUID")
-    return str(uuid4())
+    return fallback or str(uuid4())
+
+
+def _brain_failure_status(error: dict[str, Any]) -> int:
+    """Map normalized internal categories to deliberate public HTTP statuses."""
+    return {
+        "VALIDATION_ERROR": 400,
+        "AUTH_ERROR": 401,
+        "RATE_LIMIT_ERROR": 429,
+        "TIMEOUT_ERROR": 504,
+        "CONFIG_ERROR": 500,
+        "PROVIDER_ERROR": 503,
+        "FALLBACK_ERROR": 503,
+        "ROUTER_ERROR": 502,
+    }.get(error.get("code"), 500)
 
 
 def _pc_action_for_message(message: str) -> tuple[Optional[AgentActionResponse], Optional[ActionResultResponse]]:
@@ -943,8 +987,13 @@ async def cancel_reminder(reminder_id: str, user_id: Optional[str] = None):
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(request: ChatRequest, http_request: Request):
     """Chat with Vennela AI through the Central Brain and production memory."""
+    started = time.perf_counter()
     try:
-        chat_request_id = _chat_request_id(request.request_id)
+        chat_request_id = _chat_request_id(
+            request.request_id,
+            getattr(http_request.state, "request_id", None),
+        )
+        log_event("request", "/chat_received", request_id=chat_request_id, session_id=request.session_id)
         pc_action, action_result = _pc_action_for_message(request.message)
         if pc_action is not None:
             action_text = {
@@ -1050,7 +1099,7 @@ async def chat(request: ChatRequest, http_request: Request):
                     error.get("stage", "brain"),
                 )
                 raise HTTPException(
-                    status_code=503,
+                    status_code=_brain_failure_status(error),
                     detail="AI services temporarily unavailable. Please try again later.",
                 )
             text = brain_result.response
@@ -1070,9 +1119,16 @@ async def chat(request: ChatRequest, http_request: Request):
             return ChatResponse(response=text, request_id=chat_request_id)
 
         except RoutingError as exc:
-            logger.error(f"[LLMRouter] Routing failure [{getattr(exc.failure, 'kind', 'ERROR')}]: {exc}")
+            log_failure(
+                "router",
+                "chat_routing_failed",
+                exc,
+                request_id=chat_request_id,
+                session_id=request.session_id,
+                error_kind=getattr(exc.failure, "kind", "unknown"),
+            )
             if FailureKind is not None and getattr(exc.failure, "kind", None) in {FailureKind.NO_API_KEY, FailureKind.AUTHENTICATION}:
-                raise HTTPException(status_code=401, detail=f"LLM authentication failed: {exc.failure.message}")
+                raise HTTPException(status_code=401, detail="LLM authentication failed")
             raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
         except HTTPException:
             raise
@@ -1083,13 +1139,24 @@ async def chat(request: ChatRequest, http_request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        log_failure(
+            "request",
+            "/chat_failed",
+            e,
+            request_id=getattr(http_request.state, "request_id", None),
+            duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+        raise HTTPException(status_code=500, detail="Internal AI error")
 
 
 @app.post("/chat/stream", tags=["chat"])
 async def chat_stream(request: ChatRequest, http_request: Request):
     """Stream chat response with token-by-token output via Conversation Adjuster and LLM Router."""
+    chat_request_id = _chat_request_id(
+        request.request_id,
+        getattr(http_request.state, "request_id", None),
+    )
+    log_event("request", "/chat_stream_received", request_id=chat_request_id, session_id=request.session_id)
     try:
         # 1. Check for deterministic Temporal / Task / Reminder intent via NEXUS
         from core.nexus_intent import NexusIntentClassifier, execute_nexus_intent
@@ -1153,11 +1220,18 @@ async def chat_stream(request: ChatRequest, http_request: Request):
                     messages=conversation_messages,
                     latency_sensitive=policy.latency_sensitive,
                     max_tokens=policy.max_tokens,
+                    request_id=chat_request_id,
                 ):
                     yield token
             except Exception as exc:
-                logger.error(f"[LLMRouter Stream] Error: {exc}")
-                yield f"\n[AI stream error: {exc}]"
+                log_failure(
+                    "router",
+                    "stream_failed",
+                    exc,
+                    request_id=chat_request_id,
+                    session_id=request.session_id,
+                )
+                yield "\n[AI service temporarily unavailable]"
 
         return StreamingResponse(token_generator(), media_type="text/plain; charset=utf-8")
 
@@ -1337,12 +1411,17 @@ async def get_next_action(request: ActionRecommendationRequest):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    """Handle all exceptions."""
-    logger.error(f"Unhandled exception: {exc}")
-    return {
-        "error": str(exc),
-        "type": type(exc).__name__
-    }
+    """Return a stable internal-error response without exposing exception details."""
+    log_failure(
+        "response",
+        "unhandled_exception",
+        exc,
+        request_id=getattr(request.state, "request_id", None),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "type": "INTERNAL_ERROR"},
+    )
 
 
 # =========================
