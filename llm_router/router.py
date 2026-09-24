@@ -44,6 +44,7 @@ class LLMRouter:
             health=self.health,
             max_retries=self.config.max_retries,
             retry_delay_seconds=self.config.retry_delay_seconds,
+            emergency_model_id=self.config.emergency_model_id,
         )
         self._lock = threading.Lock()
 

@@ -7,6 +7,7 @@ from llm_router.gateway import Gateway
 from llm_router.providers.mock import MockProvider, MockMode
 from llm_router.registry import ModelProfile, ModelRegistry, ModelTier
 from llm_router.contracts import LLMRequest, TaskType
+from llm_router.config import RouterConfig
 from conversation.response_policy import ConversationAdjuster, DetailLevel
 from ai.ai_router import get_ai_response
 
@@ -146,6 +147,61 @@ def test_10_fallback_receives_identical_context():
     recorded = or_p.recorded_requests + groq_p.recorded_requests
     assert len(recorded) >= 2
     assert recorded[0][0].normalized_messages() == recorded[1][0].normalized_messages()
+
+
+def test_fallback_attempts_emergency_candidate_after_provider_failures():
+    primary = MockProvider("openrouter", "emergency", failures=[MockMode.SERVER_ERROR_500])
+    alternate = MockProvider("groq", "alternate", failures=[MockMode.SERVER_ERROR_500])
+    registry = ModelRegistry(
+        [
+            ModelProfile(
+                "primary", "openrouter", tier=ModelTier.GENERAL, quality_score=1.0,
+                conversation_strength=1.0, latency_ms=100,
+            ),
+            ModelProfile(
+                "alternate", "groq", tier=ModelTier.GENERAL, quality_score=0.9,
+                conversation_strength=0.9, latency_ms=150,
+            ),
+            ModelProfile(
+                "meta-llama/llama-3.1-8b-instruct", "openrouter",
+                tier=ModelTier.EMERGENCY, quality_score=0.5,
+                conversation_strength=0.5, latency_ms=250,
+            ),
+        ]
+    )
+    gateway = Gateway.create(
+        custom_providers={"openrouter": primary, "groq": alternate},
+        registry=registry,
+    )
+
+    response, attempts = gateway.router.fallback.execute_completion(
+        LLMRequest(prompt="Hello Vennela"),
+        [
+            ("primary", "openrouter"),
+            ("alternate", "groq"),
+            ("meta-llama/llama-3.1-8b-instruct", "openrouter"),
+        ],
+    )
+
+    assert response.text == "emergency"
+    assert response.provider == "openrouter"
+    assert response.fallback_used is True
+    assert primary.call_count == 2
+    assert alternate.call_count == 1
+    assert len(attempts) == 3
+
+
+def test_router_passes_configured_emergency_model_to_fallback():
+    config = RouterConfig(emergency_model_id="custom/emergency-model")
+    gateway = Gateway.create(
+        config=config,
+        custom_providers={
+            "openrouter": MockProvider("openrouter", "response"),
+            "groq": MockProvider("groq", "response"),
+        },
+    )
+
+    assert gateway.router.fallback.emergency_model_id == "custom/emergency-model"
 
 
 def test_11_normal_conversation_preserves_personality_without_restrictions():

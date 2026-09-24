@@ -54,7 +54,9 @@ class FallbackEngine:
         blocked_models: set[str] = set()
         seen: set[tuple[str, str]] = set()
 
-        max_total_attempts = self.max_retries + 1
+        # max_retries historically acted as a total-attempt cap, which could
+        # prevent the final emergency candidate from ever being tried.
+        max_total_attempts = max(self.max_retries + 1, len(candidates))
 
         for model_id, provider_name in candidates:
             if len(attempts) >= max_total_attempts:
@@ -199,7 +201,7 @@ class FallbackEngine:
         blocked_models: set[str] = set()
         seen: set[tuple[str, str]] = set()
 
-        max_total_attempts = self.max_retries + 1
+        max_total_attempts = max(self.max_retries + 1, len(candidates))
 
         for model_id, provider_name in candidates:
             if len(attempts) >= max_total_attempts:
