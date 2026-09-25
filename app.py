@@ -53,22 +53,52 @@ def get_conversation_adjuster() -> Any:
     return _conversation_adjuster_instance
 
 
+def _build_legacy_brain() -> Any:
+    """Build the existing NEXUS brain without changing its dependencies."""
+    from agents import AgentOrchestrator, AgentRegistry, VennelaBrain, VennelaReasoningAdapter
+    from agents.web_hunt import WebHuntAgent
+
+    registry = AgentRegistry()
+    registry.register(WebHuntAgent())
+    return VennelaBrain(
+        orchestrator=AgentOrchestrator(registry),
+        reasoning=VennelaReasoningAdapter(
+            adapter=get_llm_adapter(),
+            adjuster=get_conversation_adjuster(),
+        ),
+    )
+
+
+def _get_web_agent(legacy_brain: Any) -> Any:
+    """Reuse the WebHuntAgent already owned by the NEXUS registry."""
+    return legacy_brain.orchestrator.registry.get("web_hunt")
+
+
 def get_brain() -> Any:
-    """Build the Central Brain once, sharing the production router adapter."""
+    """Build the Central Brain, optionally using LangGraph with NEXUS fallback."""
     global _brain_instance
     if _brain_instance is None:
-        from agents import AgentOrchestrator, AgentRegistry, VennelaBrain, VennelaReasoningAdapter
-        from agents.web_hunt import WebHuntAgent
-
-        registry = AgentRegistry()
-        registry.register(WebHuntAgent())
-        _brain_instance = VennelaBrain(
-            orchestrator=AgentOrchestrator(registry),
-            reasoning=VennelaReasoningAdapter(
-                adapter=get_llm_adapter(),
-                adjuster=get_conversation_adjuster(),
-            ),
-        )
+        legacy_brain = _build_legacy_brain()
+        enabled = os.getenv("VENNELA_LANGGRAPH_ENABLED", "true").lower() == "true"
+        if enabled:
+            try:
+                from production_langgraph_adapter import ProductionLangGraphBrain
+                _brain_instance = ProductionLangGraphBrain(
+                    legacy_brain,
+                    get_llm_adapter(),
+                    get_conversation_adjuster(),
+                    pc_gateway=get_agent_gateway(),
+                    android_gateway=get_agent_gateway(),
+                    web_agent=_get_web_agent(legacy_brain),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "LangGraph initialization unavailable; using NEXUS brain: %s",
+                    type(exc).__name__,
+                )
+                _brain_instance = legacy_brain
+        else:
+            _brain_instance = legacy_brain
     return _brain_instance
 
 # =========================
@@ -986,6 +1016,18 @@ async def cancel_reminder(reminder_id: str, user_id: Optional[str] = None):
 
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 async def chat(request: ChatRequest, http_request: Request):
+    request_started = time.perf_counter()
+    chat_request_id = getattr(http_request.state, "request_id", None)
+    timing = {
+        "memory_stable_ms": None,
+        "memory_relevant_ms": None,
+        "memory_stable_count": 0,
+        "memory_relevant_count": 0,
+        "persistence_ms": None,
+        "langgraph_ms": None,
+        "llm_events": [],
+        "status": "completed",
+    }
     """Chat with Vennela AI through the Central Brain and production memory."""
     started = time.perf_counter()
     try:
@@ -1035,20 +1077,32 @@ async def chat(request: ChatRequest, http_request: Request):
         try:
             memory_context = _basic_memory_context(request.session_id)
             memory_api = _basic_memory_api()
+            stable_started = time.perf_counter()
             stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
+            timing["memory_stable_count"] = len(stable_memories)
+            timing["memory_stable_ms"] = round(
+                (time.perf_counter() - stable_started) * 1000, 3
+            )
+            relevant_started = time.perf_counter()
             memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
+            timing["memory_relevant_count"] = len(memories)
+            timing["memory_relevant_ms"] = round(
+                (time.perf_counter() - relevant_started) * 1000, 3
+            )
             logger.info(
-                "Chat memory retrieval: stable=%d relevant=%d",
+                "Chat memory retrieval: stable=%d relevant=%d duration_ms=%.3f",
                 len(stable_memories),
                 len(memories),
+                (time.perf_counter() - request_started) * 1000,
             )
         except Exception as memory_error:
             memories = []
             stable_memories = []
             logger.warning(
-                "Chat memory retrieval unavailable: %s: %s",
+                "Chat memory retrieval unavailable: %s: %s duration_ms=%.3f",
                 type(memory_error).__name__,
                 memory_error,
+                (time.perf_counter() - request_started) * 1000,
             )
 
         retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
@@ -1089,7 +1143,27 @@ async def chat(request: ChatRequest, http_request: Request):
                 request.message,
                 request_id=chat_request_id,
                 messages=conversation_messages,
-                context={"_system_instruction": policy.system_instruction},
+                context={
+                    "_system_instruction": policy.system_instruction,
+                    "_session_id": request.session_id,
+                    "_user_id": request.user_id,
+                    "_memory_context": [
+                        line[2:] for line in retrieved_context.splitlines()
+                        if line.startswith("- ")
+                    ],
+                    "_timing": timing,
+                },
+            )
+            timing.update(
+                {
+                    "langgraph_ms": (
+                        brain_result.metadata.get("timings_ms", {}).get(
+                            "graph_execution"
+                        )
+                        if isinstance(brain_result.metadata, dict)
+                        else None
+                    )
+                }
             )
             if brain_result.status == "failed" or not brain_result.response:
                 error = brain_result.error or {}
@@ -1106,6 +1180,7 @@ async def chat(request: ChatRequest, http_request: Request):
 
             # 5. Store to Smart Memory if configured
             if memory_api is not None and memory_context is not None:
+                persistence_started = time.perf_counter()
                 try:
                     from memory import SmartMemory
                     memory_decision = SmartMemory(memory_api).store(
@@ -1115,10 +1190,15 @@ async def chat(request: ChatRequest, http_request: Request):
                         raise RuntimeError("Basic memory store returned no saved record")
                 except Exception as store_err:
                     logger.warning("SmartMemory store warning: %s", store_err)
+                finally:
+                    timing["persistence_ms"] = round(
+                        (time.perf_counter() - persistence_started) * 1000, 3
+                    )
 
             return ChatResponse(response=text, request_id=chat_request_id)
 
         except RoutingError as exc:
+            timing["status"] = "failed"
             log_failure(
                 "router",
                 "chat_routing_failed",
@@ -1131,14 +1211,17 @@ async def chat(request: ChatRequest, http_request: Request):
                 raise HTTPException(status_code=401, detail="LLM authentication failed")
             raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
         except HTTPException:
+            timing["status"] = "failed"
             raise
         except Exception as e:
+            timing["status"] = "failed"
             logger.error(f"Chat execution error: {e}")
             raise HTTPException(status_code=500, detail="Internal AI error")
-
     except HTTPException:
+        timing["status"] = "failed"
         raise
     except Exception as e:
+        timing["status"] = "failed"
         log_failure(
             "request",
             "/chat_failed",
@@ -1147,6 +1230,31 @@ async def chat(request: ChatRequest, http_request: Request):
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
         raise HTTPException(status_code=500, detail="Internal AI error")
+    finally:
+        llm_events = timing.get("llm_events", [])
+        latest_llm = llm_events[-1] if llm_events else {}
+        logger.info(
+            "chat_timing request_id=%s status=%s total_ms=%.3f "
+            "memory_stable_ms=%s memory_stable_count=%s "
+            "memory_relevant_ms=%s memory_relevant_count=%s langgraph_ms=%s "
+            "llm_ms=%s persistence_ms=%s provider=%s model=%s "
+            "llm_success=%s fallback_used=%s attempt_count=%s",
+            chat_request_id,
+            timing["status"],
+            (time.perf_counter() - request_started) * 1000,
+            timing["memory_stable_ms"],
+            timing["memory_stable_count"],
+            timing["memory_relevant_ms"],
+            timing["memory_relevant_count"],
+            timing["langgraph_ms"],
+            latest_llm.get("duration_ms"),
+            timing["persistence_ms"],
+            latest_llm.get("provider"),
+            latest_llm.get("model"),
+            latest_llm.get("success"),
+            latest_llm.get("fallback_used"),
+            latest_llm.get("attempt_count"),
+        )
 
 
 @app.post("/chat/stream", tags=["chat"])
