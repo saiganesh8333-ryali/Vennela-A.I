@@ -177,8 +177,12 @@ class IntelligentMemory:
             )
 
         domain_value = MemoryDomain(domain)
+        # Personal/profile memories are user-scoped and deliberately have no
+        # session_id. Only session-domain records should be filtered by the
+        # active session.
+        domain_session = effective_session if domain_value is MemoryDomain.SESSION else None
         candidates: list[MemoryRecord] = self.api.retrieve(
-            effective_context, domain_value.value, effective_session, limit=100
+            effective_context, domain_value.value, domain_session, limit=100
         )
 
         if domain_value is not MemoryDomain.SESSION and effective_session:

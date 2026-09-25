@@ -77,9 +77,49 @@ class _ProductionReasoningAdapter:
         self.messages = list(messages)
         self.timing = timing
 
+    def _system_instruction_for_state(self, state) -> str:
+        sections = [self.system_instruction] if self.system_instruction else []
+        memory = [item for item in state.memory_context if str(item).strip()]
+        evidence = [
+            {
+                "source_url": item.source_url,
+                "title": item.title,
+                "facts": list(item.extracted_facts),
+                "uncertainties": list(item.uncertainties),
+            }
+            for item in state.web_evidence
+        ]
+        if memory:
+            sections.append(
+                "Verified retrieved user memory (prefer this over assumptions; "
+                "do not contradict it):\n"
+                + "\n".join(f"- {item}" for item in memory)
+            )
+        if evidence:
+            sections.append(
+                "Fresh web evidence (use these sources for current-information answers):\n"
+                + "\n".join(
+                    f"- {item['title']} ({item['source_url']}): "
+                    f"{'; '.join(item['facts'])}"
+                    for item in evidence
+                )
+            )
+        elif state.canonical_intent and state.canonical_intent.requires_web:
+            sections.append(
+                "Fresh web retrieval failed or returned no evidence. "
+                "State clearly that current data could not be retrieved; "
+                "do not invent a current answer."
+            )
+        if state.errors:
+            sections.append(
+                "Unresolved workflow failures:\n"
+                + "\n".join(f"- {error.node}: {error.message}" for error in state.errors)
+            )
+        return "\n\n".join(section for section in sections if section)
+
     def reason(self, state):
         route_kwargs = {
-            "system_instruction": self.system_instruction,
+            "system_instruction": self._system_instruction_for_state(state),
             "messages": self.messages,
             "latency_sensitive": False,
             "max_tokens": None,
