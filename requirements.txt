@@ -14,6 +14,8 @@ python-dotenv==1.0.1
 
 # HTTP utilities
 requests==2.32.3
+httpx>=0.27,<1
+tzdata
 
 # LLM API (stable version, Python 3.11 compatible)
 google-generativeai==0.7.2
@@ -21,6 +23,7 @@ google-genai>=1.0.0,<2.0.0
 protobuf==4.25.3
 grpcio==1.60.0
 openai==2.36.0
+langgraph==0.6.8
 
 # NOTE: Heavy ML libraries replaced with lightweight Python modules:
 # - sentence-transformers (200MB) -> lightweight_embeddings.py

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any, Iterator, Mapping, Sequence
 
 from .contracts import (
@@ -37,6 +38,7 @@ class VennelaLLMAdapter:
         max_tokens: int | None = None,
         task_hint: str | None = None,
         request_id: str | None = None,
+        timing_callback: Any | None = None,
     ) -> dict[str, Any]:
         """Simple text generation for Vennela backend callers."""
         request_messages = self._build_messages(prompt, system_instruction, messages)
@@ -52,7 +54,32 @@ class VennelaLLMAdapter:
             metadata={"request_id": request_id} if request_id else {},
         )
 
-        response = self.router.generate(req)
+        started = perf_counter()
+        try:
+            response = self.router.generate(req)
+        except Exception as exc:
+            if timing_callback is not None:
+                timing_callback(
+                    {
+                        "duration_ms": round((perf_counter() - started) * 1000, 3),
+                        "provider": None,
+                        "model": None,
+                        "success": False,
+                        "failure": type(exc).__name__,
+                    }
+                )
+            raise
+        if timing_callback is not None:
+            timing_callback(
+                {
+                    "duration_ms": round((perf_counter() - started) * 1000, 3),
+                    "provider": response.provider,
+                    "model": response.model_id,
+                    "success": True,
+                    "fallback_used": response.fallback_used,
+                    "attempt_count": len(response.attempts),
+                }
+            )
         return {
             "text": response.text,
             "model_id": response.model_id,
