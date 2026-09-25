@@ -80,18 +80,31 @@ class NexusIntentClassifier:
                 raw_query=raw,
             )
 
-        # 2. DATE_QUERY
-        # e.g., "what's today's date?", "what is the date", "what day is tomorrow?", "what day is it today?"
-        if re.search(r"\b(?:what(?:\'s|\s+is)?\s+(?:today(?:\'s)?\s+)?date|what\s+date\s+is\s+it|what\s+day\s+is\s+(?:today|tomorrow|yesterday)|today(?:\'s)?\s+date)\b", cleaned):
+        # 2. DATE / YEAR / MONTH QUERY
+        # e.g., "what year is it?", "what year is this?", "what is the current year?", "what's today's date?", "what is the date", "what day is tomorrow?", "what day is it today?"
+        is_year_query = bool(re.search(r"\b(?:what(?:\'s|\s+is)?\s+(?:the\s+)?(?:current\s+)?year|what\s+year\s+is\s+(?:it|this)|which\s+year(?:\s+is\s+it|\s+are\s+we\s+in)?|current\s+year)\b", cleaned))
+        is_month_query = bool(re.search(r"\b(?:what(?:\'s|\s+is)?\s+(?:the\s+)?(?:current\s+)?month|what\s+month\s+is\s+(?:it|this)|which\s+month(?:\s+is\s+it|\s+are\s+we\s+in)?|current\s+month)\b", cleaned))
+        is_date_query = bool(re.search(r"\b(?:what(?:\'s|\s+is)?\s+(?:today(?:\'s)?\s+)?date|what\s+date\s+is\s+it|what\s+day\s+is\s+(?:today|tomorrow|yesterday)|today(?:\'s)?\s+date|what\s+is\s+today|tell\s+me\s+(?:the\s+)?(?:today(?:\'s)?\s+)?date)\b", cleaned))
+
+        if is_year_query or is_month_query or is_date_query:
             target_expr = "today"
             if "tomorrow" in cleaned:
                 target_expr = "tomorrow"
             elif "yesterday" in cleaned:
                 target_expr = "yesterday"
+
+            query_type = "date"
+            if is_year_query:
+                query_type = "year"
+            elif is_month_query:
+                query_type = "month"
+            elif "what day" in cleaned:
+                query_type = "day"
+
             return NexusIntentResult(
                 intent=NexusIntent.DATE_QUERY,
                 confidence=0.98,
-                entities={"target_expr": target_expr},
+                entities={"target_expr": target_expr, "query_type": query_type},
                 raw_query=raw,
             )
 
@@ -269,12 +282,21 @@ def execute_nexus_intent(
 
     if intent_result.intent == NexusIntent.DATE_QUERY:
         target_expr = intent_result.entities.get("target_expr", "today")
+        query_type = intent_result.entities.get("query_type", "date")
+
+        if query_type == "year":
+            today_dt = temporal.now()
+            return f"It is {today_dt.year}."
+        if query_type == "month":
+            today_dt = temporal.now()
+            return f"The current month is {today_dt.strftime('%B %Y')}."
+
         if target_expr == "tomorrow":
             tomorrow_dt = temporal.tomorrow()
             day_name = temporal.day_of_week(tomorrow_dt)
             date_str = temporal.format_date(tomorrow_dt)
             # If user asked "what day is tomorrow?" return day name prominently
-            if "what day" in intent_result.raw_query.lower():
+            if query_type == "day" or "what day" in intent_result.raw_query.lower():
                 return f"Tomorrow is {day_name}."
             return f"Tomorrow's date is {date_str}."
         elif target_expr == "yesterday":
@@ -285,7 +307,7 @@ def execute_nexus_intent(
             today_dt = temporal.now()
             day_name = temporal.day_of_week(today_dt)
             date_str = temporal.format_date(today_dt)
-            if "what day" in intent_result.raw_query.lower():
+            if query_type == "day" or "what day" in intent_result.raw_query.lower():
                 return f"Today is {day_name}."
             return f"Today is {date_str}."
 

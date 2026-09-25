@@ -1,4 +1,5 @@
-﻿from enum import Enum
+from enum import Enum
+import re
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -89,7 +90,35 @@ def resolve_intent(request: str, conversation_context: Optional[List[str]] = Non
         if any(pattern in normalized for pattern in patterns):
             actions.append(name)
     action = actions[0] if actions else None
-    requires_web = any(word in text for word in ("web", "search", "research", "latest", "news", "source"))
+
+    # Pure server temporal queries (handled deterministically, not via web research)
+    is_pure_temporal = bool(re.search(
+        r"^(?:(?:what(?:\'s|\s+is)?\s+(?:the\s+)?(?:current\s+)?(?:time|date|day|year|month))|"
+        r"(?:what\s+(?:time|date|day|year|month)\s+is\s+(?:it|this|today))|"
+        r"(?:which\s+(?:year|month)\s+(?:is\s+it|are\s+we\s+in))|"
+        r"(?:what\s+is\s+today)|"
+        r"(?:tell\s+me\s+(?:the\s+)?(?:today(?:\'s)?\s+)?(?:time|date|day|year|month))|"
+        r"(?:today(?:\'s)?\s+date)|"
+        r"(?:current\s+(?:time|date|year|month)))\s*\??$",
+        text.strip()
+    ))
+
+    # Comprehensive indicators for web research and fresh external facts
+    web_keywords = (
+        "web", "search", "research", "latest", "news", "source", "sources", "internet", "online"
+    )
+    current_keywords = (
+        "current", "currently", "recent", "recently", "upcoming", "newest", "breaking",
+        "chief minister", "prime minister", "president", "governor",
+        "current office holder", "who is the current", "who is current",
+        "who won", "price of", "stock price", "weather in", "state of"
+    )
+    has_web_intent = any(w in text for w in web_keywords)
+    has_current_indicator = any(w in text for w in current_keywords) or (
+        any(w in text for w in ("today", "now", "this year", "this week"))
+        and not is_pure_temporal
+    )
+    requires_web = (has_web_intent or has_current_indicator) and not is_pure_temporal
     requires_memory = any(word in text for word in ("remember", "memory", "before", "conversation"))
     requires_tools = bool(actions) or any(word in text for word in ("execute", "run", "turn on"))
     requires_pc = any(action in {"OPEN_APP", "GET_DEVICE_TIME", "BATTERY_STATUS"} for action in actions)

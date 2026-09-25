@@ -98,7 +98,12 @@ def test_chat_direct_flow_uses_brain_router_and_history(chat_client):
     assert response.json()["response"] == "direct response"
     assert len(provider.recorded_requests) == 1
     request = provider.recorded_requests[-1][0]
-    assert request.normalized_messages() == [
+    messages = request.normalized_messages()
+    # The temporal context system instruction is injected by the production
+    # path and appears as the first system message.  Validate user/assistant
+    # history is forwarded intact after it.
+    user_assistant = [m for m in messages if m["role"] != "system"]
+    assert user_assistant == [
         {"role": "user", "content": "My name is Ganesh."},
         {"role": "assistant", "content": "Nice to meet you, Boss."},
         {"role": "user", "content": "What is my name?"},
