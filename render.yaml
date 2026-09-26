@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: vennela-a-i
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT app:app --env LIGHTWEIGHT_MODE=true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_CHAT_IDS
+        sync: false
+      - key: VENNELA_CHAT_ENABLED
+        value: "true"
+      - key: VENNELA_API_BASE_URL
+        value: https://vennela-a-i.onrender.com
+      - key: TELEGRAM_WEBHOOK_URL
+        value: https://vennela-a-i.onrender.com/telegram/webhook

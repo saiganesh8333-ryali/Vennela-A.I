@@ -5,6 +5,8 @@ Lightweight deployment with all heavyweight modules replaced.
 This is the main entry point for Render deployment.
 """
 
+import hashlib
+import hmac
 import os
 import sys
 import re
@@ -359,6 +361,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
+_telegram_application = None
+_telegram_webhook_secret = None
+
 
 @app.middleware("http")
 async def request_observability(request: Request, call_next):
@@ -386,6 +391,115 @@ async def request_observability(request: Request, call_next):
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
         raise
+
+
+def _telegram_secret_token(bot_token: str) -> str:
+    """Derive Telegram's webhook authentication secret without exposing the bot token."""
+    return hashlib.sha256(f"vennela-telegram-webhook:{bot_token}".encode()).hexdigest()
+
+
+async def _stop_telegram_application(application) -> None:
+    if application is None:
+        return
+    if application.running:
+        try:
+            await application.stop()
+        except Exception as exc:
+            logger.error(
+                "Telegram application stop failed error_class=%s",
+                type(exc).__name__,
+            )
+    if application.initialized:
+        try:
+            await application.shutdown()
+        except Exception as exc:
+            logger.error(
+                "Telegram application shutdown failed error_class=%s",
+                type(exc).__name__,
+            )
+
+
+async def _start_telegram_webhook() -> None:
+    global _telegram_application, _telegram_webhook_secret
+    if not os.environ.get("TELEGRAM_BOT_TOKEN", "").strip():
+        return
+
+    from telegram import Update
+    from telegram_interface.bot import build_application, _suppress_sensitive_http_logs
+    from telegram_interface.config import load_config
+
+    application = None
+    try:
+        config = load_config(os.environ)
+        if not config.webhook_url:
+            raise RuntimeError("TELEGRAM_WEBHOOK_URL is required for the web service")
+        _suppress_sensitive_http_logs()
+        application = build_application(config)
+        _telegram_application = application
+        _telegram_webhook_secret = _telegram_secret_token(config.bot_token)
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook(
+            url=config.webhook_url,
+            allowed_updates=Update.ALL_TYPES,
+            secret_token=_telegram_webhook_secret,
+        )
+    except Exception as exc:
+        logger.error(
+            "Telegram webhook startup failed error_class=%s",
+            type(exc).__name__,
+        )
+        await _stop_telegram_application(application)
+        _telegram_application = None
+        _telegram_webhook_secret = None
+        raise RuntimeError("Telegram webhook startup failed") from None
+
+    logger.info("Telegram webhook registered url=%s", config.webhook_url)
+
+
+@app.post("/telegram/webhook", include_in_schema=False)
+async def telegram_webhook(request: Request):
+    application = _telegram_application
+    secret = _telegram_webhook_secret
+    if application is None or secret is None:
+        raise HTTPException(status_code=503, detail="Telegram webhook unavailable")
+
+    provided_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not hmac.compare_digest(provided_secret, secret):
+        raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret")
+
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Telegram update") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid Telegram update")
+
+    from telegram import Update
+
+    try:
+        update = Update.de_json(payload, application.bot)
+    except Exception as exc:
+        logger.warning(
+            "Telegram webhook update decoding failed error_class=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=400, detail="Invalid Telegram update") from None
+    if update is None:
+        raise HTTPException(status_code=400, detail="Invalid Telegram update") from None
+    try:
+        await application.process_update(update)
+    except Exception as exc:
+        logger.error(
+            "Telegram webhook processing failed error_class=%s",
+            type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Telegram update processing failed"},
+        )
+    return {"ok": True}
+
 
 # CORS
 app.add_middleware(
@@ -1548,6 +1662,7 @@ async def startup_event():
         logger.info("Reminder scheduler started successfully.")
     except Exception as exc:
         logger.warning(f"Could not start reminder scheduler: {exc}")
+    await _start_telegram_webhook()
     print("SERVER STARTED OK")
 
 
@@ -1555,6 +1670,10 @@ async def startup_event():
 async def shutdown_event():
     """Run on shutdown."""
     logger.info("Vennela AI shutting down...")
+    global _telegram_application, _telegram_webhook_secret
+    await _stop_telegram_application(_telegram_application)
+    _telegram_application = None
+    _telegram_webhook_secret = None
     try:
         global _reminder_scheduler
         if _reminder_scheduler is not None:
