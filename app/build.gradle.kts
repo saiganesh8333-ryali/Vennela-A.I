@@ -18,7 +18,7 @@ val vennelaAgentToken: String = (localProperties.getProperty("VENNELA_AGENT_TOKE
 
 android {
     namespace = "com.vennela.ai"
-    compileSdk = 36
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.vennela.ai"
@@ -43,6 +43,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    kotlinOptions {
+        jvmTarget = "21"
     }
 
     lint {
