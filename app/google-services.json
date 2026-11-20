@@ -1,0 +1,68 @@
+{
+  "project_info": {
+    "project_number": "565826048428",
+    "project_id": "vennela-ai-ce59a",
+    "storage_bucket": "vennela-ai-ce59a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:565826048428:android:b8930a9477bfddec772a09",
+        "android_client_info": {
+          "package_name": "com.vennela.ai"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "565826048428-qc3fojnnq3rhk24hvk2lre6dh6ee1sj8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA5TpKW9H4MzMADOEkBv0IoyIDyeKEDFQk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "565826048428-qc3fojnnq3rhk24hvk2lre6dh6ee1sj8.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:565826048428:android:17acd393622174b3772a09",
+        "android_client_info": {
+          "package_name": "com.vennela.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "565826048428-qc3fojnnq3rhk24hvk2lre6dh6ee1sj8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA5TpKW9H4MzMADOEkBv0IoyIDyeKEDFQk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "565826048428-qc3fojnnq3rhk24hvk2lre6dh6ee1sj8.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

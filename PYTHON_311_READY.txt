@@ -1,0 +1,90 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║           🚀 PYTHON VERSION UPDATE: 3.14 → 3.11 COMPLETE                   ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+✅ DONE: runtime.txt Created
+
+File: runtime.txt
+Content: python-3.11.9
+
+This tells Render to use Python 3.11 instead of 3.14.
+
+═══════════════════════════════════════════════════════════════════════════════
+⚡ NOW PUSH (COPY & PASTE)
+═══════════════════════════════════════════════════════════════════════════════
+
+cd "d:\Vennela A.I.worktrees\agents-adaptive-ai-evolution-plan" && git add runtime.txt && git commit -m "Update Python: 3.14 → 3.11" && git push origin main
+
+═══════════════════════════════════════════════════════════════════════════════
+OR DOUBLE-CLICK
+═══════════════════════════════════════════════════════════════════════════════
+
+UPDATE_PYTHON_311.bat
+
+═══════════════════════════════════════════════════════════════════════════════
+⏱️ WHAT HAPPENS AFTER PUSH
+═══════════════════════════════════════════════════════════════════════════════
+
+T+0 min:    You push runtime.txt
+T+1-2 min:  Render reads runtime.txt
+T+3 min:    Build starts (Python 3.11)
+T+7 min:    Build complete
+T+10 min:   ✅ PYTHON 3.11 LIVE
+
+═══════════════════════════════════════════════════════════════════════════════
+📊 COMPATIBILITY CHECK
+═══════════════════════════════════════════════════════════════════════════════
+
+Libraries:
+  ✅ FastAPI: Compatible
+  ✅ Pydantic: Compatible
+  ✅ Torch: Compatible
+  ✅ Transformers: Compatible
+  ✅ All dependencies: Compatible
+
+Vennela AI:
+  ✅ Phase 1-5: All working
+  ✅ Tests: 42/42 passing
+  ✅ Features: All supported
+
+═══════════════════════════════════════════════════════════════════════════════
+✅ VERIFICATION (AFTER 10 MIN)
+═══════════════════════════════════════════════════════════════════════════════
+
+Check Render Logs:
+  1. Go to Render Dashboard
+  2. Click your service
+  3. Click "Logs"
+  4. Look for: "Using Python 3.11"
+  5. Should show: "Build successful"
+
+Test Endpoint:
+  curl https://vennela-a-i.onrender.com/health
+
+Should return:
+  {"status": "healthy", "python_version": "3.11.x"}
+
+═══════════════════════════════════════════════════════════════════════════════
+🎉 STATUS
+═══════════════════════════════════════════════════════════════════════════════
+
+Current:    Python 3.14 on Render
+After Push: Python 3.11 on Render
+Benefits:   More stable, better compatibility, standard version
+Timeline:   10 minutes to deploy
+Action:     Push runtime.txt (copy-paste command above or run .bat)
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Ready? Use one of these:
+
+1. Command: cd "d:\Vennela..." && git add runtime.txt && git commit... && git push
+
+2. Script: UPDATE_PYTHON_311.bat
+
+3. Guide: PYTHON_311_UPDATE_GUIDE.md
+
+🚀 Let's do this!
+

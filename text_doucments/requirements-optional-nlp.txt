@@ -1,0 +1,4 @@
+# Optional local semantic model support.
+# Install only on machines that can afford model downloads and extra RAM.
+-r requirements.txt
+sentence-transformers==5.5.0

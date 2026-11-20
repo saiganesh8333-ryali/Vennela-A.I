@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Vennela AI</string>
+    <string name="accessibility_service_description">Vennela AI Accessibility Service enables hands-free automation, clicking buttons, searching UI elements, and interacting with applications on your behalf.</string>
+</resources>
