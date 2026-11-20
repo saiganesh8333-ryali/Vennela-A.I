@@ -1,0 +1,98 @@
+# ==============================================================================
+# VENNELA AI 2.0 (MARK-II) — ROOT .GITIGNORE
+# RYALI INDUSTRIES
+# ==============================================================================
+
+# --- Secrets & Environment Configurations ---
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.keystore
+*.jks
+
+# Google / Firebase / Cloud Credentials
+google-services.json
+GoogleService-Info.plist
+client_secret*.json
+service_account*.json
+firebase-adminsdk*.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+ENV/
+env/
+
+# --- Node.js & Electron ---
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+dist-electron/
+release/
+out/
+.vite/
+
+# --- Android ---
+Android/.gradle/
+Android/build/
+Android/*/build/
+Android/local.properties
+Android/*.apk
+Android/*.aab
+Android/.idea/
+Android/*.iml
+Android/app/*.iml
+Android/captures/
+Android/.externalNativeBuild/
+Android/.cxx/
+
+# --- IDE & OS Metadata ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# --- Remediation Backups & Temporary Artifacts ---
+.remediation_backup/
+*.bak
+*.tmp

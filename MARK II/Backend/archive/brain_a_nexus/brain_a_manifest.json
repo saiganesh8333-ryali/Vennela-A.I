@@ -1,0 +1,72 @@
+﻿{
+    "schema_version":  "1.0",
+    "description":  "Brain A (VennelaBrain / NEXUS) source files. Fully decoupled from Brain B. Brain B active.",
+    "archive_name":  "brain_a_nexus",
+    "migration_phase":  "PHASE 4",
+    "project":  "Vennela AI 2.0 (MARK-II)",
+    "archived_at":  "2026-11-20T20:15:11+05:30",
+    "files":  {
+                  "web_hunt_original/errors.py":  {
+                                                      "size_bytes":  477,
+                                                      "sha256":  "f6c912ebbe3698d81a2a11854aab22752ab20658e55a9e8bee849b8a8450b3e4",
+                                                      "archived_at":  "2026-11-20T20:15:11+05:30"
+                                                  },
+                  "models.py":  {
+                                    "size_bytes":  1888,
+                                    "sha256":  "68af2d37f9cd24dee31c7147c42691a726401722f2c0ca840000a1e071c7ee3a",
+                                    "archived_at":  "2026-11-20T20:15:11+05:30"
+                                },
+                  "__init__.py":  {
+                                      "size_bytes":  880,
+                                      "sha256":  "691726db4e2b4d83e542490c6f3cf1bc20a5031f567317d76cf82c3c666881d4",
+                                      "archived_at":  "2026-11-20T20:15:11+05:30"
+                                  },
+                  "brain.py":  {
+                                   "size_bytes":  10876,
+                                   "sha256":  "9aa781a9bf8a7992fafaf53ebc9a3a28bcf808598d5f3af49d25c25048fdf521",
+                                   "archived_at":  "2026-11-20T20:15:11+05:30"
+                               },
+                  "registry.py":  {
+                                      "size_bytes":  4185,
+                                      "sha256":  "9010202ad3b148ef9ba30420750593d98f58ebdc8b569d8b65a0bca8b8d52b4b",
+                                      "archived_at":  "2026-11-20T20:15:11+05:30"
+                                  },
+                  "reasoning.py":  {
+                                       "size_bytes":  3652,
+                                       "sha256":  "196307ae29522b39b2914428a2ad51a74520bb73c76c1bb79ccc65634e96fbe0",
+                                       "archived_at":  "2026-11-20T20:15:11+05:30"
+                                   },
+                  "web_hunt_original/config.py":  {
+                                                      "size_bytes":  422,
+                                                      "sha256":  "d8dd7f18223d6307fc1f2aaf9cd7c43f76becfa5ae6983c17a1a0daa6eef3340",
+                                                      "archived_at":  "2026-11-20T20:15:11+05:30"
+                                                  },
+                  "orchestrator.py":  {
+                                          "size_bytes":  5372,
+                                          "sha256":  "c4c2f8b0aeec8523da9637073bba7e0ceba610550089f423db9afcc3ff8c297c",
+                                          "archived_at":  "2026-11-20T20:15:11+05:30"
+                                      },
+                  "web_hunt_original/agent.py":  {
+                                                     "size_bytes":  7149,
+                                                     "sha256":  "33fad49bef4f78e13093e93f0f60e122e125177de9f14f3e03f136ce24abca33",
+                                                     "archived_at":  "2026-11-20T20:15:11+05:30"
+                                                 },
+                  "planner.py":  {
+                                     "size_bytes":  4164,
+                                     "sha256":  "a02e5a99680cedbc9acbfa080633ca05b7562b5e1b2664b8adf34502dff44222",
+                                     "archived_at":  "2026-11-20T20:15:11+05:30"
+                                 },
+                  "web_hunt_original/__init__.py":  {
+                                                        "size_bytes":  183,
+                                                        "sha256":  "a31bc08b9cc1544d7da74a2332877c89d896755eacbbbaf667d6356c06e85886",
+                                                        "archived_at":  "2026-11-20T20:15:11+05:30"
+                                                    },
+                  "web_hunt_original/models.py":  {
+                                                      "size_bytes":  1687,
+                                                      "sha256":  "75c758d185926e51c0470beb0c011748619730dfd3ce78cbb6f9d586333fc547",
+                                                      "archived_at":  "2026-11-20T20:15:11+05:30"
+                                                  }
+              },
+    "archive_path":  "Backend/archive/brain_a_nexus",
+    "original_module":  "Backend/agents"
+}
