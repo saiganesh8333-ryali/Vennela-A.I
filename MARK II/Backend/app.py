@@ -20,6 +20,11 @@ from typing import Optional, List, Dict, Any
 import logging
 import time
 from observability import log_event, log_failure
+from core.memory_contracts import (
+    MemoryIsolationMode,
+    MemoryRetrievalRequest,
+    get_memory_subsystem,
+)
 
 try:
     from llm_router.adapter import VennelaLLMAdapter
@@ -43,7 +48,8 @@ def get_llm_adapter() -> Any:
     if _llm_adapter_instance is None:
         if not ROUTER_AVAILABLE or VennelaLLMAdapter is None:
             raise RuntimeError("LLM Router subsystem is not available")
-        _llm_adapter_instance = VennelaLLMAdapter()
+        mock_mode = os.getenv("LLM_ROUTER_MOCK", "false").lower() == "true"
+        _llm_adapter_instance = VennelaLLMAdapter(mock=mock_mode)
     return _llm_adapter_instance
 
 
@@ -66,11 +72,13 @@ def get_brain() -> Any:
     global _brain_instance
     if _brain_instance is None:
         from production_langgraph_adapter import ProductionLangGraphBrain
+        from web_intelligence.web_hunt import WebHuntAgent
         _brain_instance = ProductionLangGraphBrain(
             get_llm_adapter(),
             get_conversation_adjuster(),
             pc_gateway=get_agent_gateway(),
             android_gateway=get_agent_gateway(),
+            web_agent=WebHuntAgent(),
         )
     return _brain_instance
 
@@ -664,7 +672,7 @@ class IntentResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=8192, description="User prompt message")
     user_id: Optional[str] = None
     session_id: Optional[str] = None
     messages: Optional[List[Dict[str, str]]] = None
@@ -1341,43 +1349,28 @@ async def chat(
             action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
             return ChatResponse(response=action_resp, request_id=chat_request_id)
 
-        # 2. Memory is scoped to the authenticated Boss identity.
-        memory_api = None
-        memory_context = None
-        memories = []
-        stable_memories = []
-        try:
-            memory_context = _basic_memory_context(request.session_id, user_id=owner_id)
-            memory_api = _basic_memory_api()
-            stable_started = time.perf_counter()
-            stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
-            timing["memory_stable_count"] = len(stable_memories)
-            timing["memory_stable_ms"] = round(
-                (time.perf_counter() - stable_started) * 1000, 3
+        # 2. Memory Subsystem: Canonical interface (Stateless, Temporary MARK-I, or future MARK-II)
+        mem_subsystem = get_memory_subsystem()
+        mem_response = mem_subsystem.retrieve(
+            MemoryRetrievalRequest(
+                query=request.message,
+                user_id=owner_id,
+                session_id=request.session_id,
             )
-            relevant_started = time.perf_counter()
-            memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
-            timing["memory_relevant_count"] = len(memories)
-            timing["memory_relevant_ms"] = round(
-                (time.perf_counter() - relevant_started) * 1000, 3
-            )
-            logger.info(
-                "Chat memory retrieval: stable=%d relevant=%d duration_ms=%.3f",
-                len(stable_memories),
-                len(memories),
-                (time.perf_counter() - request_started) * 1000,
-            )
-        except Exception as memory_error:
-            memories = []
-            stable_memories = []
-            logger.warning(
-                "Chat memory retrieval unavailable: %s: %s duration_ms=%.3f",
-                type(memory_error).__name__,
-                memory_error,
-                (time.perf_counter() - request_started) * 1000,
-            )
+        )
+        timing["memory_mode"] = mem_response.mode.value
+        timing["memory_stable_count"] = mem_response.metadata.get("stable_count", 0)
+        timing["memory_relevant_count"] = mem_response.metadata.get("relevant_count", len(mem_response.context_strings))
+        timing["memory_stable_ms"] = 0.0
+        timing["memory_relevant_ms"] = mem_response.duration_ms
 
-        retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
+        retrieved_context = "\n".join(mem_response.context_strings)
+        logger.info(
+            "Memory subsystem evaluated: mode=%s count=%d request_id=%s",
+            mem_response.mode.value,
+            mem_response.memory_count,
+            chat_request_id,
+        )
 
         # Read personality from environment (keep existing prompts unchanged)
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
@@ -1450,22 +1443,20 @@ async def chat(
                 )
             text = brain_result.response
 
-            # 5. Store to Smart Memory if configured
-            if memory_api is not None and memory_context is not None:
-                persistence_started = time.perf_counter()
-                try:
-                    from memory import SmartMemory
-                    memory_decision = SmartMemory(memory_api).store(
-                        memory_context, request.message, domain="boss_personal", existing=memories,
-                    )
-                    if memory_decision.action in {"create", "update"} and memory_decision.record is None:
-                        raise RuntimeError("Basic memory store returned no saved record")
-                except Exception as store_err:
-                    logger.warning("SmartMemory store warning: %s", store_err)
-                finally:
-                    timing["persistence_ms"] = round(
-                        (time.perf_counter() - persistence_started) * 1000, 3
-                    )
+            # 5. Store to memory subsystem if connected (guaranteed no-op in stateless mode)
+            persistence_started = time.perf_counter()
+            try:
+                mem_subsystem.store(
+                    request.message,
+                    user_id=owner_id,
+                    session_id=request.session_id,
+                )
+            except Exception as store_err:
+                logger.warning("Memory store warning: %s", store_err)
+            finally:
+                timing["persistence_ms"] = round(
+                    (time.perf_counter() - persistence_started) * 1000, 3
+                )
 
             return ChatResponse(response=text, request_id=chat_request_id)
 
@@ -1553,25 +1544,16 @@ async def chat_stream(
             action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
             return StreamingResponse(iter([action_resp]), media_type="text/plain; charset=utf-8")
 
-        # Build memory context & personality
-        retrieved_context = ""
-        try:
-            memory_context = _basic_memory_context(request.session_id, user_id=owner_id)
-            memory_api = _basic_memory_api()
-            stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
-            memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
-            logger.info(
-                "Streaming memory retrieval: stable=%d relevant=%d",
-                len(stable_memories),
-                len(memories),
+        # Build memory context & personality via canonical memory subsystem
+        mem_subsystem = get_memory_subsystem()
+        mem_response = mem_subsystem.retrieve(
+            MemoryRetrievalRequest(
+                query=request.message,
+                user_id=owner_id,
+                session_id=request.session_id,
             )
-            retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
-        except Exception as memory_error:
-            logger.warning(
-                "Streaming memory retrieval unavailable: %s: %s",
-                type(memory_error).__name__,
-                memory_error,
-            )
+        )
+        retrieved_context = "\n".join(mem_response.context_strings)
 
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
         VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", "")

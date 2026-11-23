@@ -263,6 +263,8 @@ class TestSEC09AndroidSecurityConfig(unittest.TestCase):
 
     def test_cleartext_traffic_disabled_in_manifest(self):
         manifest_path = os.path.join(WORKSPACE_DIR, "Android", "app", "src", "main", "AndroidManifest.xml")
+        if not os.path.exists(manifest_path):
+            manifest_path = os.path.join(WORKSPACE_DIR, "..", "app", "src", "main", "AndroidManifest.xml")
         self.assertTrue(os.path.exists(manifest_path))
         with open(manifest_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -271,6 +273,8 @@ class TestSEC09AndroidSecurityConfig(unittest.TestCase):
 
     def test_dynamic_agent_token_in_config(self):
         config_path = os.path.join(WORKSPACE_DIR, "Android", "app", "src", "main", "java", "com", "vennela", "ai", "AgentConfig.kt")
+        if not os.path.exists(config_path):
+            config_path = os.path.join(WORKSPACE_DIR, "..", "app", "src", "main", "java", "com", "vennela", "ai", "AgentConfig.kt")
         self.assertTrue(os.path.exists(config_path))
         with open(config_path, "r", encoding="utf-8") as f:
             content = f.read()
