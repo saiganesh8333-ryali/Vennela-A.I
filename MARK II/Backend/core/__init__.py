@@ -8,6 +8,7 @@ from .memory_contracts import (
     MemoryRetrievalResponse,
     MemorySubsystemInterface,
     StatelessMemoryProvider,
+    TemporaryMarkIMemoryProvider,
     get_memory_subsystem,
     reset_memory_subsystem,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "MemoryRetrievalResponse",
     "MemorySubsystemInterface",
     "StatelessMemoryProvider",
+    "TemporaryMarkIMemoryProvider",
     "get_memory_subsystem",
     "reset_memory_subsystem",
 ]

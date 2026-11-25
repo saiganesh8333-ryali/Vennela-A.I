@@ -49,13 +49,13 @@ class TestMemoryContractsAndAllowlist:
     """Verify strict allowlist and gating of memory providers."""
 
     def test_allowed_providers_set(self):
-        """Allowlist contains exactly stateless and mark_ii."""
-        assert ALLOWED_MEMORY_PROVIDERS == {"stateless", "mark_ii"}
+        """Allowlist contains stateless, mark_i, and mark_ii."""
+        assert ALLOWED_MEMORY_PROVIDERS == {"stateless", "mark_i", "mark_ii"}
 
     def test_default_provider_is_stateless_when_unset(self):
-        """Unset VENNELA_MEMORY_PROVIDER defaults deterministically to stateless."""
-        if "VENNELA_MEMORY_PROVIDER" in os.environ:
-            del os.environ["VENNELA_MEMORY_PROVIDER"]
+        """Unset VENNELA_MEMORY_PROVIDER and disabled flag defaults deterministically to stateless."""
+        os.environ.pop("VENNELA_MEMORY_PROVIDER", None)
+        os.environ.pop("VENNELA_MEMORY_ENABLED", None)
         provider = get_memory_subsystem()
         assert isinstance(provider, StatelessMemoryProvider)
         assert provider.mode == MemoryIsolationMode.STATELESS_ISOLATED
@@ -67,16 +67,19 @@ class TestMemoryContractsAndAllowlist:
         assert isinstance(provider, StatelessMemoryProvider)
         assert provider.mode == MemoryIsolationMode.STATELESS_ISOLATED
 
-    def test_rejection_of_legacy_mark_i_provider(self):
-        """VENNELA_MEMORY_PROVIDER=mark_i fails fast with ValueError."""
+    def test_explicit_mark_i_provider_activates_temporary_mark_i(self):
+        """VENNELA_MEMORY_PROVIDER=mark_i activates TemporaryMarkIMemoryProvider."""
+        from core.memory_contracts import TemporaryMarkIMemoryProvider
+
         os.environ["VENNELA_MEMORY_PROVIDER"] = "mark_i"
-        with pytest.raises(ValueError, match=r"\[SEC-MEM-LEGACY-BLOCKED\]"):
-            get_memory_subsystem()
+        provider = get_memory_subsystem()
+        assert isinstance(provider, TemporaryMarkIMemoryProvider)
+        assert provider.mode == MemoryIsolationMode.MARK_I_TEMPORARY
 
     def test_rejection_of_legacy_string_provider(self):
         """VENNELA_MEMORY_PROVIDER=legacy fails fast with ValueError."""
         os.environ["VENNELA_MEMORY_PROVIDER"] = "legacy"
-        with pytest.raises(ValueError, match=r"\[SEC-MEM-LEGACY-BLOCKED\]"):
+        with pytest.raises(ValueError, match=r"\[SEC-MEM-INVALID-PROVIDER\]"):
             get_memory_subsystem()
 
     def test_rejection_of_unknown_provider(self):

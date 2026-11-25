@@ -715,7 +715,17 @@ async def root():
 @app.get("/health", tags=["health"])
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "lightweight_mode": LIGHTWEIGHT_MODE}
+    mem_mode = "unknown"
+    try:
+        mem_mode = get_memory_subsystem().mode.value
+    except Exception:
+        mem_mode = "error"
+    return {
+        "status": "healthy",
+        "lightweight_mode": LIGHTWEIGHT_MODE,
+        "brain": "brain_b_langgraph",
+        "memory_mode": mem_mode,
+    }
 
 
 @app.post("/embed", response_model=EmbeddingResponse, tags=["embeddings"])
@@ -1302,13 +1312,14 @@ async def chat(
                 )
             text = brain_result.response
 
-            # 5. Store to memory subsystem if connected (guaranteed no-op in stateless mode)
+            # 5. Store to memory subsystem after successful Brain B validation (no-op in stateless mode)
             persistence_started = time.perf_counter()
             try:
                 mem_subsystem.store(
                     request.message,
                     user_id=owner_id,
                     session_id=request.session_id,
+                    metadata={"store_session": True, "request_id": chat_request_id},
                 )
             except Exception as store_err:
                 logger.warning("Memory store warning: %s", store_err)
@@ -1438,6 +1449,7 @@ async def chat_stream(
         adapter = get_llm_adapter()
 
         def token_generator():
+            has_output = False
             try:
                 for token in adapter.stream_text(
                     request.message,
@@ -1447,6 +1459,8 @@ async def chat_stream(
                     max_tokens=policy.max_tokens,
                     request_id=chat_request_id,
                 ):
+                    if token:
+                        has_output = True
                     yield token
             except Exception as exc:
                 log_failure(
@@ -1457,6 +1471,17 @@ async def chat_stream(
                     session_id=request.session_id,
                 )
                 yield "\n[AI service temporarily unavailable]"
+            else:
+                if has_output:
+                    try:
+                        mem_subsystem.store(
+                            request.message,
+                            user_id=owner_id,
+                            session_id=request.session_id,
+                            metadata={"store_session": True, "request_id": chat_request_id},
+                        )
+                    except Exception as store_err:
+                        logger.warning("Streaming memory store warning: %s", store_err)
 
         return StreamingResponse(token_generator(), media_type="text/plain; charset=utf-8")
 

@@ -52,8 +52,8 @@ jobs:
           VENNELA_BOSS_ID: "boss_ci_test"
           VENNELA_AGENT_TOKEN: "token_ci_test_secret_123456789"
           LIGHTWEIGHT_MODE: "true"
-          VENNELA_MEMORY_PROVIDER: "stateless"
-          VENNELA_MEMORY_ENABLED: "false"
+          VENNELA_MEMORY_PROVIDER: "mark_i"
+          VENNELA_MEMORY_ENABLED: "true"
           LLM_ROUTER_MOCK: "true"
         run: |
-          pytest tests/test_mark_ii_memory_contracts.py tests/test_brain_b_production_activation.py tests/test_security_remediation.py -v
+          pytest tests/test_mark_ii_memory_contracts.py tests/test_mark_i_temporary_memory.py tests/test_brain_b_production_activation.py tests/test_security_remediation.py -v

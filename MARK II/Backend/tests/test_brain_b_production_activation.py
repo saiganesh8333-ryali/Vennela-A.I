@@ -154,23 +154,25 @@ class TestBrainBProductionActivation(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_06_stateless_chat(self):
         """Verify chat executes through Brain B with memory strictly isolated."""
-        mem_subsystem = get_memory_subsystem()
-        self.assertEqual(mem_subsystem.mode, MemoryIsolationMode.STATELESS_ISOLATED)
+        with patch.dict(os.environ, {"VENNELA_MEMORY_PROVIDER": "stateless", "VENNELA_MEMORY_ENABLED": "false"}):
+            reset_memory_subsystem()
+            mem_subsystem = get_memory_subsystem()
+            self.assertEqual(mem_subsystem.mode, MemoryIsolationMode.STATELESS_ISOLATED)
 
-        resp = mem_subsystem.retrieve(
-            MemoryRetrievalRequest(query="test", user_id=self.boss_id)
-        )
-        self.assertEqual(resp.context_strings, [])
-        self.assertEqual(resp.memory_count, 0)
+            resp = mem_subsystem.retrieve(
+                MemoryRetrievalRequest(query="test", user_id=self.boss_id)
+            )
+            self.assertEqual(resp.context_strings, [])
+            self.assertEqual(resp.memory_count, 0)
 
-        # Chat through endpoint with Bearer auth
-        payload = {"message": "Hello Vennela, how are you today?"}
-        res = self.client.post("/chat", json=payload, headers=self.auth_headers)
-        self.assertEqual(res.status_code, 200, f"Chat failed: {res.text}")
-        data = res.json()
-        self.assertIn("response", data)
-        self.assertIn("request_id", data)
-        self.assertTrue(len(data["response"]) > 0)
+            # Chat through endpoint with Bearer auth
+            payload = {"message": "Hello Vennela, how are you today?"}
+            res = self.client.post("/chat", json=payload, headers=self.auth_headers)
+            self.assertEqual(res.status_code, 200, f"Chat failed: {res.text}")
+            data = res.json()
+            self.assertIn("response", data)
+            self.assertIn("request_id", data)
+            self.assertTrue(len(data["response"]) > 0)
 
     # -------------------------------------------------------------------------
     # TEST 7: LLM Router Integration Test
