@@ -43,9 +43,11 @@ services:
       - key: VENNELA_CHAT_ENABLED
         value: "true"
       - key: VENNELA_MEMORY_PROVIDER
-        value: "mark_i"
+        value: "stateless"
       - key: VENNELA_MEMORY_ENABLED
-        value: "true"
+        value: "false"
+      - key: LLM_ROUTER_MOCK
+        value: "false"
       - key: VENNELA_API_BASE_URL
         value: https://vennela-a-i.onrender.com
       - key: VENNELA_TIMEZONE

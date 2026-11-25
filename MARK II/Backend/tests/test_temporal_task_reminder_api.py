@@ -17,6 +17,9 @@ from llm_router.providers.mock import MockProvider
 
 @pytest.fixture
 def client(monkeypatch):
+    import os
+    os.environ["VENNELA_BOSS_ID"] = "boss_user"
+    os.environ["VENNELA_AGENT_TOKEN"] = "token_test"
     fixed = datetime(2026, 9, 10, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
     tc = TemporalContext("Asia/Kolkata", fixed_now=fixed)
     
@@ -45,7 +48,8 @@ def client(monkeypatch):
     mock_adapter = VennelaLLMAdapter(router=gateway.router)
     monkeypatch.setattr(app_module, "_llm_adapter_instance", mock_adapter)
     
-    return TestClient(app)
+    token = os.environ.get("VENNELA_AGENT_TOKEN", "token_test")
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 # =======================================================

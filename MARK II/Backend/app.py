@@ -101,153 +101,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _basic_memory_context(session_id: Optional[str] = None, user_id: Optional[str] = None):
-    """Build the single trusted Boss context from server configuration and authenticated identity."""
-    from memory import AuthContext
-
-    boss_id = (user_id.strip() if user_id and user_id.strip() else None) or os.getenv("VENNELA_BOSS_ID", "").strip()
-    if not boss_id:
-        raise RuntimeError("VENNELA_BOSS_ID is required for memory access")
-    normalized_session = session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
-    return AuthContext(user_id=boss_id, authenticated=True, session_id=normalized_session)
-
-
-def _basic_memory_api():
-    """Construct the production Basic Memory API lazily."""
-    from supabase import create_client
-    from memory import MemoryAPI, SupabaseMemoryRepository
-
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
-    if not url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required for memory access")
-    return MemoryAPI(SupabaseMemoryRepository(create_client(url, key)))
-
-
-def _retrieve_chat_memories(memory_context, memory_api, query: str):
-    """Use the existing semantic memory layer for response-time retrieval."""
-    from memory import IntelligentMemory
-
-    scored = IntelligentMemory(memory_api).retrieve_semantic(
-        memory_context,
-        query,
-        session_id=memory_context.session_id,
-        limit=5,
-        min_similarity=0.05,
-    )
-    return [item.record for item in scored]
-
-
-def _retrieve_stable_chat_memories(memory_context, memory_api, limit: int = 12):
-    """Select a bounded, deterministic profile/project context from canonical memory."""
-    from memory import MemoryCategory, MemoryDomain
-
-    if limit <= 0:
-        return []
-
-    stable_categories = (
-        MemoryCategory.PROFILE,
-        MemoryCategory.PREFERENCE,
-        MemoryCategory.INTEREST,
-        MemoryCategory.GOAL,
-        MemoryCategory.PROJECT,
-    )
-    records = memory_api.retrieve(
-        memory_context,
-        MemoryDomain.BOSS_PERSONAL.value,
-        limit=100,
-    )
-    active_records = [
-        record for record in records
-        if record.active
-        and record.category in stable_categories
-        and not (
-            isinstance(record.content, dict)
-            and record.content.get("lifecycle_state") in {"SUPERSEDED", "OBSOLETE", "INACTIVE"}
-        )
-        and not (
-            isinstance(record.content, dict)
-            and record.content.get("evolution_state") == "historical"
-        )
-    ]
-
-    selected = []
-    for category in stable_categories:
-        category_records = [
-            record for record in active_records if record.category is category
-        ]
-        category_records.sort(
-            key=lambda record: (
-                -_memory_importance(record),
-                -record.updated_at.timestamp(),
-                record.memory_id,
-            )
-        )
-        selected.extend(category_records[:3])
-        if len(selected) >= limit:
-            break
-    return selected[:limit]
-
-
-def _memory_text(record) -> str:
-    content = record.content
-    if isinstance(content, dict):
-        content = content.get("text", content.get("content", ""))
-    return content.strip() if isinstance(content, str) else ""
-
-
-def _memory_importance(record) -> float:
-    if not isinstance(record.content, dict):
-        return 0.5
-    try:
-        return max(0.0, min(1.0, float(record.content.get("importance", 0.5))))
-    except (TypeError, ValueError):
-        return 0.5
-
-
-def _build_chat_memory_instruction(stable_memories, relevant_memories) -> str:
-    """Format bounded stable and query-relevant memories without duplicate records."""
-    stable_ids = {record.memory_id for record in stable_memories}
-    stable_lines = [f"- {_memory_text(record)}" for record in stable_memories if _memory_text(record)]
-    relevant_lines = [
-        f"- {_memory_text(record)}"
-        for record in relevant_memories
-        if record.memory_id not in stable_ids and _memory_text(record)
-    ]
-    sections = []
-    if stable_lines:
-        sections.append("Stable user context:\n" + "\n".join(stable_lines))
-    if relevant_lines:
-        sections.append("Relevant memories:\n" + "\n".join(relevant_lines))
-    return "\n\n".join(sections)
-
-
-def _memory_category(message: str):
-    lower = message.lower()
-    if "my name is" in lower or "call me" in lower:
-        return "Profile"
-    if "goal" in lower or "i want" in lower:
-        return "Goal"
-    if "project" in lower:
-        return "Project"
-    if "skill" in lower or "i can " in lower:
-        return "Skill"
-    if "i like" in lower or "i love" in lower or "favorite" in lower or "prefer" in lower:
-        return "Preference"
-    if "interested" in lower:
-        return "Interest"
-    return "Fact"
-
-
-def _is_memory_eligible(message: str) -> bool:
-    lower = message.lower()
-    return any(marker in lower for marker in (
-        "remember", "my name is", "call me", "favorite", "i like", "i love",
-        "prefer", "my goal", "i want", "my project", "my skill", "i can ",
-        "interested in",
-    ))
-
-
 # =========================
 # TEMPORAL, TASK & REMINDER SINGLETONS
 # =========================
@@ -277,14 +130,6 @@ def _resolve_and_verify_owner(
                 detail="Access denied: Cannot access or manipulate resources belonging to another user.",
             )
     return authenticated_id
-
-
-def _get_owner_id(request_user_id: Optional[str] = None) -> str:
-    """Resolve authoritative owner id for task/reminder isolation."""
-    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip() or "boss_user"
-    if request_user_id and request_user_id.strip():
-        return request_user_id.strip()
-    return boss_id
 
 
 def get_temporal_context():
@@ -525,6 +370,15 @@ def validate_startup_security_config() -> None:
         logger.critical(msg)
         raise RuntimeError(msg)
 
+    # Reject LLM_ROUTER_MOCK=true in production/Render environments
+    is_mock = os.getenv("LLM_ROUTER_MOCK", "false").lower() == "true"
+    env = os.getenv("ENVIRONMENT", "").lower()
+    is_prod = env in {"production", "prod", "staging"} or os.getenv("RENDER", "").lower() == "true"
+    if is_mock and is_prod:
+        msg = "[SEC-MOCK-01 FATAL] Mock mode (LLM_ROUTER_MOCK=true) cannot be enabled in production or Render environments."
+        logger.critical(msg)
+        raise RuntimeError(msg)
+
 
 # Execute fail-fast security validation on module load
 validate_startup_security_config()
@@ -556,7 +410,12 @@ async def get_current_authenticated_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip() or "boss_user"
+    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip()
+    if not boss_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Server security configuration error: VENNELA_BOSS_ID is unconfigured.",
+        )
     return AuthenticatedUser(user_id=boss_id, is_boss=True, role="boss")
 
 

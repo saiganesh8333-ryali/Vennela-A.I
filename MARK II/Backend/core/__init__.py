@@ -2,17 +2,18 @@
 
 from .intelligence_contracts import BrainResult, DelegationDecision, DelegationType
 from .memory_contracts import (
+    ALLOWED_MEMORY_PROVIDERS,
     MemoryIsolationMode,
     MemoryRetrievalRequest,
     MemoryRetrievalResponse,
     MemorySubsystemInterface,
     StatelessMemoryProvider,
-    TemporaryMarkIMemoryProvider,
     get_memory_subsystem,
     reset_memory_subsystem,
 )
 
 __all__ = [
+    "ALLOWED_MEMORY_PROVIDERS",
     "BrainResult",
     "DelegationDecision",
     "DelegationType",
@@ -21,7 +22,6 @@ __all__ = [
     "MemoryRetrievalResponse",
     "MemorySubsystemInterface",
     "StatelessMemoryProvider",
-    "TemporaryMarkIMemoryProvider",
     "get_memory_subsystem",
     "reset_memory_subsystem",
 ]

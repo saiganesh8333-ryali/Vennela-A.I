@@ -92,7 +92,12 @@ foreach ($entry in $manifestFiles) {
     }
 
     $actual = (Get-FileHash $fullPath -Algorithm SHA256).Hash.ToLower()
-    if ($actual -eq $expected) {
+    $content = [System.IO.File]::ReadAllText($fullPath).Replace("`r`n", "`n")
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    $normalizedBytes = [System.Text.Encoding]::UTF8.GetBytes($content)
+    $normalizedHash = [System.BitConverter]::ToString($hasher.ComputeHash($normalizedBytes)).Replace("-", "").ToLower()
+
+    if ($actual -eq $expected -or $normalizedHash -eq $expected) {
         Write-Host "  OK: $relPath" -ForegroundColor Green
     } else {
         Write-Host "  HASH MISMATCH: $relPath" -ForegroundColor Red
