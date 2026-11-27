@@ -273,3 +273,136 @@ def test_14_router_owns_task_classification(prompt, expected):
     ).router
 
     assert router.infer_task_type(LLMRequest(prompt=prompt)) is expected
+
+
+def test_15_env_model_overrides_and_router_health_reporting(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3-32b")
+
+    cfg = RouterConfig.from_env()
+    assert cfg.openrouter_model == "openai/gpt-4o-mini"
+    assert cfg.groq_model == "qwen/qwen3-32b"
+    assert cfg.default_model_id == "openai/gpt-4o-mini"
+
+    groq_p = MockProvider("groq", "Mock Groq override")
+    or_p = MockProvider("openrouter", "Mock OpenRouter override")
+    adapter = VennelaLLMAdapter(
+        router=Gateway.create(
+            config=cfg,
+            custom_providers={"openrouter": or_p, "groq": groq_p},
+        ).router
+    )
+
+    health = adapter.health_summary()
+    assert health["openrouter"]["model_id"] == "openai/gpt-4o-mini"
+    assert health["groq"]["model_id"] == "qwen/qwen3-32b"
+
+    result = adapter.route_text("Hello Vennela")
+    assert result["provider"] == "openrouter"
+    assert result["model_id"] == "openai/gpt-4o-mini"
+
+    import app as app_module
+    monkeypatch.setattr(app_module, "_llm_adapter_instance", adapter)
+    token = os.environ.get("VENNELA_AGENT_TOKEN", "token_test")
+    client = TestClient(app, headers={"Authorization": f"Bearer {token}"})
+    resp = client.get("/router/health")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["openrouter"]["model_id"] == "openai/gpt-4o-mini"
+    assert payload["groq"]["model_id"] == "qwen/qwen3-32b"
+
+
+def test_16_default_router_health_populates_active_models(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+
+    adapter = VennelaLLMAdapter(mock=True)
+    health = adapter.health_summary()
+    assert health["openrouter"]["model_id"] == "google/gemini-2.5-flash-lite"
+    assert health["groq"]["model_id"] == "llama-3.3-70b-versatile"
+
+
+def test_17_configured_provider_priority_when_other_key_missing(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test_configured_key")
+    monkeypatch.setenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+    cfg = RouterConfig.from_env()
+    gw = Gateway.create(config=cfg)
+    chain = gw.router.build_candidate_chain(LLMRequest(prompt="Hello"), TaskType.CONVERSATION)
+    assert chain[0] == ("llama-3.3-70b-versatile", "groq")
+
+
+def test_18_provider_error_diagnostics_preserve_status_and_redact_secrets(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    from llm_router.contracts import FailureKind, RoutingError
+    from llm_router.providers.groq import GroqProvider
+    from llm_router.providers.openrouter import OpenRouterProvider
+
+    assert GroqProvider.base_url == "https://api.groq.com/openai/v1/chat/completions"
+    assert OpenRouterProvider.base_url == "https://openrouter.ai/api/v1/chat/completions"
+
+    # 1. Groq 404 preserves status_code=404 and upstream message without exposing key
+    def fake_urlopen_404(req, timeout=30.0):
+        raise HTTPError(
+            req.full_url,
+            404,
+            "Not Found",
+            hdrs=None,
+            fp=BytesIO(b'{"error":{"message":"The model foo does not exist (Bearer gsk_secret_123456789)","code":"model_not_found"}}'),
+        )
+
+    monkeypatch.setattr("llm_router.providers.base.urlopen", fake_urlopen_404)
+    groq = GroqProvider(api_key="gsk_secret_123456789")
+    with pytest.raises(RoutingError) as exc_info:
+        groq.complete(LLMRequest(prompt="hi"), "foo")
+    assert exc_info.value.failure.kind == FailureKind.MODEL_UNAVAILABLE
+    assert exc_info.value.failure.status_code == 404
+    assert "model_not_found" in exc_info.value.failure.message
+    assert "gsk_secret_123456789" not in exc_info.value.failure.message
+
+    # 2. OpenRouter HTTP-200 JSON error payload is classified with error code & message
+    class _FakeResp:
+        status = 200
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+        def read(self) -> bytes:
+            return self._data
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        "llm_router.providers.base.urlopen",
+        lambda req, timeout=30.0: _FakeResp(b'{"error":{"message":"Insufficient credits","code":402}}'),
+    )
+    openrouter = OpenRouterProvider(api_key="sk-or-v1-secret-test")
+    with pytest.raises(RoutingError) as or_exc:
+        openrouter.complete(LLMRequest(prompt="hi"), "meta-llama/llama-3.1-8b-instruct")
+    assert or_exc.value.failure.kind == FailureKind.RATE_LIMIT
+    assert or_exc.value.failure.status_code == 402
+    assert "Insufficient credits" in or_exc.value.failure.message
+
+    # 3. Streaming SSE error event raises classified RoutingError with status & message
+    class _FakeSSEResp:
+        status = 200
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = lines
+        def __iter__(self):
+            return iter(self._lines)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        "llm_router.providers.base.urlopen",
+        lambda req, timeout=30.0: _FakeSSEResp([b'data: {"error":{"message":"Model not found","code":404}}\n']),
+    )
+    with pytest.raises(RoutingError) as stream_exc:
+        list(openrouter.stream(LLMRequest(prompt="hi"), "bad/model"))
+    assert stream_exc.value.failure.kind == FailureKind.MODEL_UNAVAILABLE
+    assert stream_exc.value.failure.status_code == 404
+    assert "Model not found" in stream_exc.value.failure.message

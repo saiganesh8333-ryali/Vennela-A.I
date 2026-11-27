@@ -14,7 +14,12 @@ from ..contracts import (
     LLMStreamChunk,
     RoutingError,
 )
-from .base import BaseLLMProvider, validate_response
+from .base import (
+    BaseLLMProvider,
+    extract_openai_chat_text,
+    raise_if_provider_error,
+    validate_response,
+)
 
 
 class GroqProvider(BaseLLMProvider):
@@ -47,21 +52,9 @@ class GroqProvider(BaseLLMProvider):
             "Accept": "application/json",
         }
 
-        raw = self._post_json(self.base_url, payload, headers)
+        raw = self._post_json(self.base_url, payload, headers, model_id=model_id)
         latency_ms = (time.perf_counter() - started) * 1000.0
-
-        try:
-            choice = raw["choices"][0]["message"]
-            content = choice.get("content")
-            if content is None and "reasoning" in choice:
-                content = choice["reasoning"]
-            if content is None:
-                content = ""
-            text = str(content)
-        except (KeyError, IndexError, TypeError):
-            raise RoutingError(
-                Failure(FailureKind.MALFORMED_RESPONSE, "Groq returned malformed response choices", True, self.provider_name)
-            )
+        text = extract_openai_chat_text(raw, provider_name=self.provider_name, model_id=model_id)
 
         usage = raw.get("usage") if isinstance(raw, dict) else {}
         resp = LLMResponse(
@@ -113,26 +106,29 @@ class GroqProvider(BaseLLMProvider):
             for chunk_data in sse_stream:
                 try:
                     parsed = json.loads(chunk_data)
-                    choices = parsed.get("choices", [])
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        now_ms = (time.perf_counter() - started) * 1000.0
-                        ttft = now_ms if not ttft_recorded else None
-                        ttft_recorded = True
-                        yield LLMStreamChunk(
-                            delta=content,
-                            model_id=model_id,
-                            provider=self.provider_name,
-                            index=idx,
-                            is_final=False,
-                            ttft_ms=ttft,
-                        )
-                        idx += 1
-                except (json.JSONDecodeError, KeyError, IndexError):
+                except ValueError:
                     continue
+                raise_if_provider_error(parsed, provider_name=self.provider_name, model_id=model_id, http_status=200)
+                if not isinstance(parsed, dict):
+                    continue
+                choices = parsed.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                content = delta.get("content", "")
+                if content:
+                    now_ms = (time.perf_counter() - started) * 1000.0
+                    ttft = now_ms if not ttft_recorded else None
+                    ttft_recorded = True
+                    yield LLMStreamChunk(
+                        delta=content,
+                        model_id=model_id,
+                        provider=self.provider_name,
+                        index=idx,
+                        is_final=False,
+                        ttft_ms=ttft,
+                    )
+                    idx += 1
         finally:
             close_fn = getattr(sse_stream, "close", None)
             if callable(close_fn):

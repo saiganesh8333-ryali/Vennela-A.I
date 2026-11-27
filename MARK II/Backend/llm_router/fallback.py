@@ -162,6 +162,7 @@ class FallbackEngine:
                     model=model_id,
                     status_code=exc.failure.status_code,
                     error_kind=exc.failure.kind.value,
+                    detail=exc.failure.message,
                     duration_ms=round(attempt_latency, 2),
                 )
 
@@ -272,10 +273,22 @@ class FallbackEngine:
 
             except (RoutingError, StopIteration) as exc:
                 attempt_latency = (time.perf_counter() - attempt_start) * 1000.0
-                failure = exc.failure if isinstance(exc, RoutingError) else Failure(FailureKind.SERVER, "Stream ended prematurely", True, provider_name)
+                failure = exc.failure if isinstance(exc, RoutingError) else Failure(FailureKind.SERVER, "Stream ended prematurely", True, provider_name, model_id=model_id)
                 last_failure = failure
                 attempts.append(Attempt(model_id=model_id, provider=provider_name, latency_ms=attempt_latency, failure=failure))
                 self.health.record_failure(provider_name, failure.kind, model_id, reason=failure.message)
+                log_failure(
+                    "provider",
+                    "stream_request_failed",
+                    exc if isinstance(exc, BaseException) else RuntimeError(failure.message),
+                    request_id=request.metadata.get("request_id"),
+                    provider=provider_name,
+                    model=model_id,
+                    status_code=failure.status_code,
+                    error_kind=failure.kind.value,
+                    detail=failure.message,
+                    duration_ms=round(attempt_latency, 2),
+                )
 
                 if failure.kind in {
                     FailureKind.AUTHENTICATION,

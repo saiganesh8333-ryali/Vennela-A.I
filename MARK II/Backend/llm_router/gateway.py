@@ -37,7 +37,7 @@ class Gateway:
     ) -> "Gateway":
         cfg = config or RouterConfig.from_env()
         health = HealthRegistry()
-        reg = registry or default_model_registry()
+        reg = registry or default_model_registry(cfg)
 
         if custom_providers is not None:
             providers = custom_providers
@@ -105,10 +105,7 @@ class Gateway:
         return self.router.stream(req)
 
     def health_summary(self) -> dict[str, Any]:
-        return {
-            provider: self.router.health.summary(provider)
-            for provider in self.router.providers
-        }
+        return self.router.health_summary()
 
     def model_catalog(self) -> list[dict[str, Any]]:
         return [

@@ -164,11 +164,63 @@ class LLMRouter:
         ):
             score += 0.45
 
+        # Explicit provider-level env overrides always lead their provider
+        if (
+            self.config.openrouter_model
+            and profile.provider == "openrouter"
+            and profile.model_id == self.config.openrouter_model
+        ):
+            score += 1.0
+        if (
+            self.config.groq_model
+            and profile.provider == "groq"
+            and profile.model_id == self.config.groq_model
+        ):
+            score += 0.35
+
         # Provider health consideration (read-only probe=False)
         if not self.health.is_available(profile.provider, profile.model_id, probe=False):
             score -= 100.0
 
         return score
+
+    def _provider_configured(self, provider_name: str) -> bool:
+        provider = self.providers.get(provider_name)
+        if provider is None:
+            return False
+        return bool(provider.health_check())
+
+    def active_model_for_provider(self, provider: str) -> str:
+        """Return the configured primary model ID for a provider."""
+        if provider == "openrouter" and self.config.openrouter_model:
+            return self.config.openrouter_model
+        if provider == "groq" and self.config.groq_model:
+            return self.config.groq_model
+
+        profiles = self.registry.by_provider(provider)
+        if not profiles:
+            return ""
+        for profile in profiles:
+            if profile.model_id == self.config.default_model_id:
+                return profile.model_id
+        best = max(
+            profiles,
+            key=lambda p: (
+                0 if p.tier == ModelTier.EMERGENCY else 1,
+                p.quality_score,
+                -p.latency_ms,
+            ),
+        )
+        return best.model_id
+
+    def health_summary(self) -> dict[str, Any]:
+        """Return provider health & circuit summaries with active model IDs."""
+        summary_map: dict[str, Any] = {}
+        for provider in self.providers:
+            entry = self.health.summary(provider)
+            entry["model_id"] = self.active_model_for_provider(provider)
+            summary_map[provider] = entry
+        return summary_map
 
     def build_candidate_chain(self, request: LLMRequest, task_type: TaskType) -> list[tuple[str, str]]:
         """Construct deterministic candidate chain: PRIMARY -> ALT_MODEL -> ALT_PROVIDER -> EMERGENCY."""
@@ -186,7 +238,11 @@ class LLMRouter:
 
         ranked = sorted(
             all_candidates,
-            key=lambda p: (-self.score_model(p, task_type, request), p.latency_ms),
+            key=lambda p: (
+                -int(self._provider_configured(p.provider)),
+                -self.score_model(p, task_type, request),
+                p.latency_ms,
+            ),
         )
 
         candidates: list[tuple[str, str]] = []

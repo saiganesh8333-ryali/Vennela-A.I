@@ -178,10 +178,7 @@ class VennelaLLMAdapter:
 
     def health_summary(self) -> dict[str, Any]:
         """Diagnostic summary of provider health and circuit states."""
-        return {
-            provider: self.router.health.summary(provider)
-            for provider in self.router.providers
-        }
+        return self.router.health_summary()
 
     def model_catalog(self) -> list[dict[str, Any]]:
         """List configured model profiles."""

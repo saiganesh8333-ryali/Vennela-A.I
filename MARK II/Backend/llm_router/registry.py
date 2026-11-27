@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable, Sequence
+import os
+from typing import TYPE_CHECKING, Iterable, Sequence
 
 from .contracts import TaskType
+
+if TYPE_CHECKING:
+    from .config import RouterConfig
 
 
 class ModelTier(str, Enum):
@@ -93,9 +97,66 @@ class ModelRegistry:
         ]
 
 
-def default_model_registry() -> ModelRegistry:
-    """Standard model profiles including OpenRouter tiers and Groq models."""
-    return ModelRegistry(
+def _register_override_profile(
+    registry: ModelRegistry,
+    model_id: str,
+    provider: str,
+    default_latency_ms: float,
+) -> None:
+    """Register or promote an env-configured primary model override for a provider."""
+    clean_id = model_id.strip()
+    if not clean_id:
+        return
+    try:
+        existing = registry.get(clean_id)
+    except KeyError:
+        existing = None
+
+    all_caps = frozenset({"chat", "json", "coding", "reasoning", "conversation", "fast"})
+    if existing is not None and existing.provider == provider:
+        registry.register(
+            ModelProfile(
+                model_id=existing.model_id,
+                provider=provider,
+                tier=existing.tier,
+                context_window=existing.context_window,
+                capabilities=existing.capabilities | all_caps,
+                quality_score=max(existing.quality_score, 0.96),
+                reasoning_strength=max(existing.reasoning_strength, 0.95),
+                coding_strength=max(existing.coding_strength, 0.92),
+                conversation_strength=max(existing.conversation_strength, 0.96),
+                latency_ms=min(existing.latency_ms, default_latency_ms),
+                input_cost_per_million=existing.input_cost_per_million,
+                output_cost_per_million=existing.output_cost_per_million,
+                tool_calling=existing.tool_calling,
+                vision=existing.vision,
+                enabled=True,
+                display_name=existing.display_name or f"{clean_id} ({provider})",
+            )
+        )
+        return
+
+    registry.register(
+        ModelProfile(
+            model_id=clean_id,
+            provider=provider,
+            tier=ModelTier.FAST,
+            context_window=128_000,
+            capabilities=all_caps,
+            quality_score=0.96,
+            reasoning_strength=0.95,
+            coding_strength=0.92,
+            conversation_strength=0.96,
+            latency_ms=default_latency_ms,
+            tool_calling=True,
+            display_name=f"{clean_id} ({provider} override)",
+        )
+    )
+
+
+def default_model_registry(config: "RouterConfig | None" = None) -> ModelRegistry:
+    """Standard model profiles including OpenRouter tiers, Groq models, and env overrides."""
+    registry = ModelRegistry(
         [
             # OpenRouter: Fast Model (Default)
             ModelProfile(
@@ -134,7 +195,7 @@ def default_model_registry() -> ModelRegistry:
             ),
             # OpenRouter: Deep Reasoning Model
             ModelProfile(
-                model_id="deepseek/deepseek-r1",
+                model_id="deepseek/deepseek-r1-0528",
                 provider="openrouter",
                 tier=ModelTier.REASONING,
                 context_window=128_000,
@@ -146,7 +207,7 @@ def default_model_registry() -> ModelRegistry:
                 latency_ms=1600.0,
                 input_cost_per_million=0.55,
                 output_cost_per_million=2.19,
-                display_name="DeepSeek R1 (OpenRouter)",
+                display_name="DeepSeek R1 0528 (OpenRouter)",
             ),
             # OpenRouter: Emergency Model (Lightweight / highly available fallback)
             ModelProfile(
@@ -200,3 +261,21 @@ def default_model_registry() -> ModelRegistry:
             ),
         ]
     )
+
+    openrouter_override = (
+        (config.openrouter_model if config else None)
+        or (os.getenv("OPENROUTER_MODEL") or "").strip()
+        or None
+    )
+    groq_override = (
+        (config.groq_model if config else None)
+        or (os.getenv("GROQ_MODEL") or "").strip()
+        or None
+    )
+
+    if openrouter_override:
+        _register_override_profile(registry, openrouter_override, "openrouter", 220.0)
+    if groq_override:
+        _register_override_profile(registry, groq_override, "groq", 110.0)
+
+    return registry

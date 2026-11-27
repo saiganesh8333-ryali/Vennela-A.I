@@ -13,11 +13,15 @@ services:
         sync: false
       - key: VENNELA_CORS_ORIGINS
         value: https://vennela-a-i.onrender.com,https://vennela.ai
-      # LLM Provider Secrets
+      # LLM Provider Secrets & Model Overrides
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.5-flash-lite
       - key: GROQ_API_KEY
         sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
       - key: GEMINI_API_KEY
         sync: false
       # Database & Storage

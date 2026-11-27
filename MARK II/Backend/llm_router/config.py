@@ -58,6 +58,9 @@ class ProviderConfig:
 class RouterConfig:
     default_model_id: str = "google/gemini-2.5-flash-lite"
     emergency_model_id: str = "meta-llama/llama-3.1-8b-instruct"
+    openrouter_model: str | None = None
+    groq_model: str | None = None
+    gemini_model: str | None = None
     timeout_seconds: float = 30.0
     max_retries: int = 2
     retry_delay_seconds: float = 0.5
@@ -71,6 +74,8 @@ class RouterConfig:
         return (
             f"RouterConfig(default_model_id={self.default_model_id!r}, "
             f"emergency_model_id={self.emergency_model_id!r}, "
+            f"openrouter_model={self.openrouter_model!r}, "
+            f"groq_model={self.groq_model!r}, "
             f"timeout={self.timeout_seconds}, max_retries={self.max_retries}, "
             f"groq_key={'***' if self.groq_api_key else None}, "
             f"openrouter_key={'***' if self.openrouter_api_key else None})"
@@ -87,15 +92,24 @@ class RouterConfig:
             recovery_seconds=max(0.1, _float(os.getenv("HEALTH_RECOVERY_SECONDS"), 30.0)),
         )
 
+        openrouter_model = (os.getenv("OPENROUTER_MODEL") or "").strip() or None
+        groq_model = (os.getenv("GROQ_MODEL") or "").strip() or None
+        gemini_model = (os.getenv("GEMINI_MODEL") or "").strip() or None
+        env_default = (os.getenv("DEFAULT_MODEL_ID") or "").strip()
+        env_emergency = (os.getenv("EMERGENCY_MODEL_ID") or "").strip()
+
         return cls(
-            default_model_id=os.getenv("DEFAULT_MODEL_ID", "google/gemini-2.5-flash-lite"),
-            emergency_model_id=os.getenv("EMERGENCY_MODEL_ID", "meta-llama/llama-3.1-8b-instruct"),
+            default_model_id=env_default or openrouter_model or "google/gemini-2.5-flash-lite",
+            emergency_model_id=env_emergency or "meta-llama/llama-3.1-8b-instruct",
+            openrouter_model=openrouter_model,
+            groq_model=groq_model,
+            gemini_model=gemini_model,
             timeout_seconds=max(0.1, _float(os.getenv("ROUTER_TIMEOUT_SECONDS"), 30.0)),
             max_retries=max(0, _int(os.getenv("MAX_RETRIES"), 2)),
             retry_delay_seconds=max(0.0, _float(os.getenv("ROUTER_RETRY_DELAY_SECONDS"), 0.5)),
             circuit_breaker=cb_config,
-            groq_api_key=os.getenv("GROQ_API_KEY") or None,
-            openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
-            gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
+            groq_api_key=(os.getenv("GROQ_API_KEY") or "").strip() or None,
+            openrouter_api_key=(os.getenv("OPENROUTER_API_KEY") or "").strip() or None,
+            gemini_api_key=(os.getenv("GEMINI_API_KEY") or "").strip() or None,
             telemetry_enabled=_bool(os.getenv("TELEMETRY_ENABLED"), True),
         )
