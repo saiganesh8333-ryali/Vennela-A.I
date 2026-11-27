@@ -7,7 +7,10 @@ making the lab mocks part of the production path.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 import importlib
 import logging
 from threading import RLock
@@ -21,6 +24,27 @@ logger = logging.getLogger(__name__)
 _LAB_IMPORT_LOCK = RLock()
 _LANGGRAPH_CLASS = None
 _RESOLVE_INTENT = None
+_TELEMETRY_CLASS = None
+
+
+@dataclass(frozen=True)
+class _RequestExecutionContext:
+    """Immutable per-request execution scope isolated across concurrent Brain B calls."""
+
+    request_id: str
+    user_id: str | None
+    session_id: str
+    system_instruction: str | None
+    messages: tuple[dict[str, str], ...]
+    memory_context: tuple[str, ...]
+    timing: dict[str, Any] | None = None
+    telemetry: Any = None
+
+
+_REQUEST_EXECUTION_CONTEXT: ContextVar[_RequestExecutionContext | None] = ContextVar(
+    "vennela_brain_b_request_context",
+    default=None,
+)
 
 
 @contextmanager
@@ -55,20 +79,70 @@ def _resolve_lab_intent():
     return _RESOLVE_INTENT
 
 
+def _in_memory_telemetry_class():
+    global _TELEMETRY_CLASS
+    if _TELEMETRY_CLASS is not None:
+        return _TELEMETRY_CLASS
+    with _LAB_IMPORT_LOCK:
+        if _TELEMETRY_CLASS is None:
+            with _isolated_lab_imports():
+                _TELEMETRY_CLASS = importlib.import_module(
+                    "vennela_langgraph.observability.telemetry"
+                ).InMemoryTelemetry
+    return _TELEMETRY_CLASS
+
+
+def _copy_message(item: Any) -> dict[str, str]:
+    if isinstance(item, Mapping):
+        return {
+            "role": str(item.get("role", "user")),
+            "content": str(item.get("content", "")),
+        }
+    return {
+        "role": str(getattr(item, "role", "user")),
+        "content": str(getattr(item, "content", "")),
+    }
+
+
+class _RequestScopedTelemetry:
+    """Routes node telemetry into the active request's isolated telemetry sink."""
+
+    @property
+    def events(self) -> list[Any]:
+        req_ctx = _REQUEST_EXECUTION_CONTEXT.get()
+        if req_ctx is not None and req_ctx.telemetry is not None:
+            return list(req_ctx.telemetry.events)
+        return []
+
+    def record(self, *args, **kwargs) -> None:
+        req_ctx = _REQUEST_EXECUTION_CONTEXT.get()
+        if req_ctx is not None and req_ctx.telemetry is not None:
+            req_ctx.telemetry.record(*args, **kwargs)
+
+
 class _ProvidedMemoryAgent:
-    def __init__(self, context: Sequence[str]):
-        self.context = list(context)
+    """Stateless memory adapter reading the active request's memory context."""
+
+    def __init__(self, context: Sequence[str] = ()):
+        self._default_context = tuple(context)
+
+    @property
+    def context(self) -> list[str]:
+        req_ctx = _REQUEST_EXECUTION_CONTEXT.get()
+        if req_ctx is not None:
+            return list(req_ctx.memory_context)
+        return list(self._default_context)
 
     def retrieve(self, request: str) -> list[str]:
-        return list(self.context)
+        return self.context
 
 
 class _ProductionReasoningAdapter:
     def __init__(
         self,
         llm_adapter: Any,
-        system_instruction: str | None,
-        messages: Sequence[Mapping[str, str]],
+        system_instruction: str | None = None,
+        messages: Sequence[Mapping[str, str]] = (),
         timing: dict[str, Any] | None = None,
     ):
         self.llm_adapter = llm_adapter
@@ -76,8 +150,18 @@ class _ProductionReasoningAdapter:
         self.messages = list(messages)
         self.timing = timing
 
-    def _system_instruction_for_state(self, state) -> str:
-        sections = [self.system_instruction] if self.system_instruction else []
+    def _system_instruction_for_state(
+        self,
+        state,
+        *,
+        system_instruction: str | None = None,
+    ) -> str:
+        base_instruction = (
+            system_instruction
+            if system_instruction is not None
+            else self.system_instruction
+        )
+        sections = [base_instruction] if base_instruction else []
         memory = [item for item in state.memory_context if str(item).strip()]
         evidence = [
             {
@@ -117,15 +201,31 @@ class _ProductionReasoningAdapter:
         return "\n\n".join(section for section in sections if section)
 
     def reason(self, state):
+        req_ctx = _REQUEST_EXECUTION_CONTEXT.get()
+        system_instruction = (
+            req_ctx.system_instruction
+            if req_ctx is not None
+            else self.system_instruction
+        )
+        messages = (
+            [dict(item) for item in req_ctx.messages]
+            if req_ctx is not None
+            else list(self.messages)
+        )
+        timing = req_ctx.timing if req_ctx is not None else self.timing
+
         route_kwargs = {
-            "system_instruction": self._system_instruction_for_state(state),
-            "messages": self.messages,
+            "system_instruction": self._system_instruction_for_state(
+                state,
+                system_instruction=system_instruction,
+            ),
+            "messages": messages,
             "latency_sensitive": False,
             "max_tokens": None,
             "task_hint": "reasoning",
         }
-        if self.timing is not None:
-            route_kwargs["timing_callback"] = self.timing.setdefault(
+        if timing is not None:
+            route_kwargs["timing_callback"] = timing.setdefault(
                 "llm_events", []
             ).append
         raw = self.llm_adapter.route_text(state.original_request, **route_kwargs)
@@ -162,14 +262,13 @@ class ProductionLangGraphBrain:
         android_gateway: Any | None = None,
         web_agent: Any | None = None,
     ):
-        # Brain A is fully decoupled — no legacy_brain attribute.
         self.llm_adapter = llm_adapter
         self.adjuster = adjuster
         self.pc_gateway = pc_gateway
         self.android_gateway = android_gateway
         self.web_agent = web_agent
         self._graph = None
-        self._graph_execution_lock = RLock()
+        self._graph_build_lock = RLock()
 
     def _supports_graph_request(self, request: str) -> bool:
         intent = _resolve_lab_intent()(request)
@@ -181,30 +280,29 @@ class ProductionLangGraphBrain:
             not intent.requires_web or self.web_agent is not None
         )
 
-    def _get_graph(self, memory_context, system_instruction, messages):
+    def _get_graph(
+        self,
+        memory_context: Sequence[str] = (),
+        system_instruction: str | None = None,
+        messages: Sequence[Mapping[str, str]] = (),
+    ):
+        """Return the shared compiled Brain B graph without mutating request state."""
         if self._graph is None:
-            graph_class = _langgraph_brain_class()
-            self._graph = graph_class(
-                intelligence_mode="DETERMINISTIC",
-                memory=_ProvidedMemoryAgent(memory_context),
-                pc=self._production_pc_agent(),
-                android=self._production_android_agent(),
-                web=self._production_web_agent(),
-            )
-            self._graph.nodes["reasoning"].set_reasoning_adapter(
-                _ProductionReasoningAdapter(
-                    self.llm_adapter,
-                    system_instruction,
-                    messages,
-                ),
-            )
-        else:
-            self._graph.nodes["memory"].agent.context = list(memory_context)
-            self._graph.nodes["reasoning"].reasoning_adapter = _ProductionReasoningAdapter(
-                self.llm_adapter,
-                system_instruction,
-                messages,
-            )
+            with self._graph_build_lock:
+                if self._graph is None:
+                    graph_class = _langgraph_brain_class()
+                    graph = graph_class(
+                        intelligence_mode="DETERMINISTIC",
+                        memory=_ProvidedMemoryAgent(),
+                        pc=self._production_pc_agent(),
+                        android=self._production_android_agent(),
+                        web=self._production_web_agent(),
+                        telemetry=_RequestScopedTelemetry(),
+                    )
+                    graph.nodes["reasoning"].set_reasoning_adapter(
+                        _ProductionReasoningAdapter(self.llm_adapter),
+                    )
+                    self._graph = graph
         return self._graph
 
     def _production_pc_agent(self):
@@ -227,6 +325,30 @@ class ProductionLangGraphBrain:
         from production_capability_adapters import ProductionWebAgent
 
         return ProductionWebAgent(self.web_agent)
+
+    def _run_graph_sync(
+        self,
+        task: str,
+        request_ctx: _RequestExecutionContext,
+    ):
+        """Execute the synchronous LangGraph invocation inside an isolated request scope."""
+        graph = self._get_graph(
+            request_ctx.memory_context,
+            request_ctx.system_instruction,
+            request_ctx.messages,
+        )
+        token = _REQUEST_EXECUTION_CONTEXT.set(request_ctx)
+        try:
+            return graph.run(
+                task,
+                session_id=request_ctx.session_id,
+                user_id=request_ctx.user_id,
+                messages=[dict(item) for item in request_ctx.messages],
+                memory_context=list(request_ctx.memory_context),
+                request_id=request_ctx.request_id or None,
+            )
+        finally:
+            _REQUEST_EXECUTION_CONTEXT.reset(token)
 
     async def process(
         self,
@@ -283,32 +405,30 @@ class ProductionLangGraphBrain:
             )
 
         try:
-            with self._graph_execution_lock:
-                system_instruction = (context or {}).get("_system_instruction")
-                history = list(messages or [{"role": "user", "content": task}])
-                graph = self._get_graph(
-                    list(memory_context or []),
-                    system_instruction,
-                    history,
-                )
-                graph_nodes = getattr(graph, "nodes", {})
-                reasoning_node = graph_nodes.get("reasoning")
-                if reasoning_node is not None:
-                    reasoning_adapter = getattr(
-                        reasoning_node, "reasoning_adapter", None
-                    )
-                    if reasoning_adapter is not None:
-                        reasoning_adapter.timing = timing
-                graph_started = perf_counter()
-                state = graph.run(
-                    task,
-                    session_id=session_id or "production-session",
-                    user_id=user_id,
-                    messages=history,
-                    memory_context=list(memory_context or []),
-                    request_id=request_id,
-                )
-                graph_execution_ms = round((perf_counter() - graph_started) * 1000, 3)
+            system_instruction = context.get("_system_instruction")
+            history = tuple(
+                _copy_message(item)
+                for item in (messages or [{"role": "user", "content": task}])
+            )
+            memory_items = tuple(str(item) for item in (memory_context or ()))
+            telemetry_cls = _in_memory_telemetry_class()
+            request_ctx = _RequestExecutionContext(
+                request_id=request_id or "",
+                user_id=user_id,
+                session_id=session_id or "production-session",
+                system_instruction=system_instruction,
+                messages=history,
+                memory_context=memory_items,
+                timing=timing,
+                telemetry=telemetry_cls(),
+            )
+            graph_started = perf_counter()
+            state = await asyncio.to_thread(
+                self._run_graph_sync,
+                task,
+                request_ctx,
+            )
+            graph_execution_ms = round((perf_counter() - graph_started) * 1000, 3)
             reasoning_errors = [
                 error for error in state.errors if error.node == "reasoning"
             ]

@@ -54,11 +54,17 @@ class MemoryAPI:
             records.sort(key=lambda item: (len(terms & set(str(item.content).lower().split())), item.updated_at), reverse=True)
         return records[:max(0, limit)]
 
+    def _get_for_context(self, context: AuthContext, memory_id: str) -> Optional[MemoryRecord]:
+        if getattr(self.repository, "requires_owner_scoped_get", False):
+            return self.repository.get(memory_id, owner_id=context.user_id)
+        return self.repository.get(memory_id)
+
     def update(self, context: AuthContext, memory_id: str, content: Any,
                category: Optional[str] = None):
         if not memory_id:
             raise ValueError("memory_id is required")
-        existing = self.repository.get(memory_id)
+        authorize(context, MemoryDomain.BOSS_PERSONAL)
+        existing = self._get_for_context(context, memory_id)
         if existing is None:
             raise KeyError("memory not found")
         authorize(context, existing.domain, existing.session_id, existing)
@@ -66,15 +72,16 @@ class MemoryAPI:
                                 self._category(category) if category is not None else existing.category,
                                 content, existing.session_id, existing.created_at,
                                 datetime.now(timezone.utc), existing.active)
-        return self.repository.update(updated)
+        return self.repository.update(updated, owner_id=context.user_id)
 
     def forget(self, context: AuthContext, memory_id: str):
         if not memory_id:
             raise ValueError("memory_id is required")
-        existing = self.repository.get(memory_id)
+        authorize(context, MemoryDomain.BOSS_PERSONAL)
+        existing = self._get_for_context(context, memory_id)
         if existing is None:
             raise KeyError("memory not found")
         authorize(context, existing.domain, existing.session_id, existing)
-        return self.repository.forget(memory_id)
+        return self.repository.forget(memory_id, owner_id=context.user_id)
 
     delete = forget

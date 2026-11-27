@@ -164,33 +164,12 @@ def patch_imports():
     sys.modules['sklearn'] = lightweight_ml
     sys.modules['sklearn.preprocessing'] = lightweight_ml
     sys.modules['sklearn.decomposition'] = lightweight_ml
-    sys.modules['torch'] = _create_torch_stub()
+    sys.modules['torch'] = LightweightImportRedirector._create_torch_stub()
 
     print("[Lightweight Mode] Manual patches applied to sys.modules")
 
 
-def _create_torch_stub():
-    """Create torch stub module."""
-    import types
-    import numpy as np
-
-    torch_stub = types.ModuleType('torch')
-    torch_stub.Tensor = np.ndarray
-    torch_stub.tensor = np.array
-    torch_stub.zeros = np.zeros
-    torch_stub.ones = np.ones
-    torch_stub.randn = np.random.randn
-
-    nn_stub = types.ModuleType('nn')
-    nn_stub.Module = object
-    nn_stub.Linear = lambda *args: None
-    torch_stub.nn = nn_stub
-
-    cuda_stub = types.ModuleType('cuda')
-    cuda_stub.is_available = lambda: False
-    torch_stub.cuda = cuda_stub
-
-    return torch_stub
+_create_torch_stub = LightweightImportRedirector._create_torch_stub
 
 
 # =========================

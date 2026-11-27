@@ -122,9 +122,15 @@ class VennelaLLMAdapter:
             metadata={"request_id": request_id} if request_id else {},
         )
 
-        for chunk in self.router.stream(req):
-            if chunk.delta:
-                yield chunk.delta
+        router_stream = self.router.stream(req)
+        try:
+            for chunk in router_stream:
+                if chunk.delta:
+                    yield chunk.delta
+        finally:
+            close_fn = getattr(router_stream, "close", None)
+            if callable(close_fn):
+                close_fn()
 
     @staticmethod
     def _build_messages(

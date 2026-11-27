@@ -112,29 +112,35 @@ class OpenRouterProvider(BaseLLMProvider):
         ttft_recorded = False
         idx = 0
 
-        for chunk_data in self._stream_sse(self.base_url, payload, headers, model_id):
-            try:
-                parsed = json.loads(chunk_data)
-                choices = parsed.get("choices", [])
-                if not choices:
+        sse_stream = self._stream_sse(self.base_url, payload, headers, model_id)
+        try:
+            for chunk_data in sse_stream:
+                try:
+                    parsed = json.loads(chunk_data)
+                    choices = parsed.get("choices", [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        now_ms = (time.perf_counter() - started) * 1000.0
+                        ttft = now_ms if not ttft_recorded else None
+                        ttft_recorded = True
+                        yield LLMStreamChunk(
+                            delta=content,
+                            model_id=model_id,
+                            provider=self.provider_name,
+                            index=idx,
+                            is_final=False,
+                            ttft_ms=ttft,
+                        )
+                        idx += 1
+                except (json.JSONDecodeError, KeyError, IndexError):
                     continue
-                delta = choices[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    now_ms = (time.perf_counter() - started) * 1000.0
-                    ttft = now_ms if not ttft_recorded else None
-                    ttft_recorded = True
-                    yield LLMStreamChunk(
-                        delta=content,
-                        model_id=model_id,
-                        provider=self.provider_name,
-                        index=idx,
-                        is_final=False,
-                        ttft_ms=ttft,
-                    )
-                    idx += 1
-            except (json.JSONDecodeError, KeyError, IndexError):
-                continue
+        finally:
+            close_fn = getattr(sse_stream, "close", None)
+            if callable(close_fn):
+                close_fn()
 
         yield LLMStreamChunk(
             delta="",

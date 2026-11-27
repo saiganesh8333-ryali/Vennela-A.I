@@ -5,12 +5,30 @@ Lightweight deployment with all heavyweight modules replaced.
 This is the main entry point for Render deployment.
 """
 
+import asyncio
+import contextlib
 import hashlib
 import hmac
+import inspect
 import os
+from pathlib import Path
 import sys
 import re
 from uuid import UUID, uuid4
+from dotenv import load_dotenv
+
+_BACKEND_ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+
+def _load_backend_dotenv(env_path: Path | None = None) -> bool:
+    """Load Backend/.env locally before security validation without overriding existing env vars."""
+    target = env_path if env_path is not None else _BACKEND_ENV_FILE
+    if target.is_file():
+        return bool(load_dotenv(dotenv_path=target, override=False))
+    return False
+
+
+_load_backend_dotenv()
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +38,11 @@ from typing import Optional, List, Dict, Any
 import logging
 import time
 from observability import log_event, log_failure
+from core.memory_contracts import (
+    MemoryIsolationMode,
+    MemoryRetrievalRequest,
+    get_memory_subsystem,
+)
 
 try:
     from llm_router.adapter import VennelaLLMAdapter
@@ -43,7 +66,8 @@ def get_llm_adapter() -> Any:
     if _llm_adapter_instance is None:
         if not ROUTER_AVAILABLE or VennelaLLMAdapter is None:
             raise RuntimeError("LLM Router subsystem is not available")
-        _llm_adapter_instance = VennelaLLMAdapter()
+        mock_mode = os.getenv("LLM_ROUTER_MOCK", "false").lower() == "true"
+        _llm_adapter_instance = VennelaLLMAdapter(mock=mock_mode)
     return _llm_adapter_instance
 
 
@@ -66,11 +90,13 @@ def get_brain() -> Any:
     global _brain_instance
     if _brain_instance is None:
         from production_langgraph_adapter import ProductionLangGraphBrain
+        from web_intelligence.web_hunt import WebHuntAgent
         _brain_instance = ProductionLangGraphBrain(
             get_llm_adapter(),
             get_conversation_adjuster(),
             pc_gateway=get_agent_gateway(),
             android_gateway=get_agent_gateway(),
+            web_agent=WebHuntAgent(),
         )
     return _brain_instance
 
@@ -91,153 +117,6 @@ if LIGHTWEIGHT_MODE:
 # Now safe to import the rest
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def _basic_memory_context(session_id: Optional[str] = None, user_id: Optional[str] = None):
-    """Build the single trusted Boss context from server configuration and authenticated identity."""
-    from memory import AuthContext
-
-    boss_id = (user_id.strip() if user_id and user_id.strip() else None) or os.getenv("VENNELA_BOSS_ID", "").strip()
-    if not boss_id:
-        raise RuntimeError("VENNELA_BOSS_ID is required for memory access")
-    normalized_session = session_id.strip() if isinstance(session_id, str) and session_id.strip() else None
-    return AuthContext(user_id=boss_id, authenticated=True, session_id=normalized_session)
-
-
-def _basic_memory_api():
-    """Construct the production Basic Memory API lazily."""
-    from supabase import create_client
-    from memory import MemoryAPI, SupabaseMemoryRepository
-
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_KEY", "").strip()
-    if not url or not key:
-        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required for memory access")
-    return MemoryAPI(SupabaseMemoryRepository(create_client(url, key)))
-
-
-def _retrieve_chat_memories(memory_context, memory_api, query: str):
-    """Use the existing semantic memory layer for response-time retrieval."""
-    from memory import IntelligentMemory
-
-    scored = IntelligentMemory(memory_api).retrieve_semantic(
-        memory_context,
-        query,
-        session_id=memory_context.session_id,
-        limit=5,
-        min_similarity=0.05,
-    )
-    return [item.record for item in scored]
-
-
-def _retrieve_stable_chat_memories(memory_context, memory_api, limit: int = 12):
-    """Select a bounded, deterministic profile/project context from canonical memory."""
-    from memory import MemoryCategory, MemoryDomain
-
-    if limit <= 0:
-        return []
-
-    stable_categories = (
-        MemoryCategory.PROFILE,
-        MemoryCategory.PREFERENCE,
-        MemoryCategory.INTEREST,
-        MemoryCategory.GOAL,
-        MemoryCategory.PROJECT,
-    )
-    records = memory_api.retrieve(
-        memory_context,
-        MemoryDomain.BOSS_PERSONAL.value,
-        limit=100,
-    )
-    active_records = [
-        record for record in records
-        if record.active
-        and record.category in stable_categories
-        and not (
-            isinstance(record.content, dict)
-            and record.content.get("lifecycle_state") in {"SUPERSEDED", "OBSOLETE", "INACTIVE"}
-        )
-        and not (
-            isinstance(record.content, dict)
-            and record.content.get("evolution_state") == "historical"
-        )
-    ]
-
-    selected = []
-    for category in stable_categories:
-        category_records = [
-            record for record in active_records if record.category is category
-        ]
-        category_records.sort(
-            key=lambda record: (
-                -_memory_importance(record),
-                -record.updated_at.timestamp(),
-                record.memory_id,
-            )
-        )
-        selected.extend(category_records[:3])
-        if len(selected) >= limit:
-            break
-    return selected[:limit]
-
-
-def _memory_text(record) -> str:
-    content = record.content
-    if isinstance(content, dict):
-        content = content.get("text", content.get("content", ""))
-    return content.strip() if isinstance(content, str) else ""
-
-
-def _memory_importance(record) -> float:
-    if not isinstance(record.content, dict):
-        return 0.5
-    try:
-        return max(0.0, min(1.0, float(record.content.get("importance", 0.5))))
-    except (TypeError, ValueError):
-        return 0.5
-
-
-def _build_chat_memory_instruction(stable_memories, relevant_memories) -> str:
-    """Format bounded stable and query-relevant memories without duplicate records."""
-    stable_ids = {record.memory_id for record in stable_memories}
-    stable_lines = [f"- {_memory_text(record)}" for record in stable_memories if _memory_text(record)]
-    relevant_lines = [
-        f"- {_memory_text(record)}"
-        for record in relevant_memories
-        if record.memory_id not in stable_ids and _memory_text(record)
-    ]
-    sections = []
-    if stable_lines:
-        sections.append("Stable user context:\n" + "\n".join(stable_lines))
-    if relevant_lines:
-        sections.append("Relevant memories:\n" + "\n".join(relevant_lines))
-    return "\n\n".join(sections)
-
-
-def _memory_category(message: str):
-    lower = message.lower()
-    if "my name is" in lower or "call me" in lower:
-        return "Profile"
-    if "goal" in lower or "i want" in lower:
-        return "Goal"
-    if "project" in lower:
-        return "Project"
-    if "skill" in lower or "i can " in lower:
-        return "Skill"
-    if "i like" in lower or "i love" in lower or "favorite" in lower or "prefer" in lower:
-        return "Preference"
-    if "interested" in lower:
-        return "Interest"
-    return "Fact"
-
-
-def _is_memory_eligible(message: str) -> bool:
-    lower = message.lower()
-    return any(marker in lower for marker in (
-        "remember", "my name is", "call me", "favorite", "i like", "i love",
-        "prefer", "my goal", "i want", "my project", "my skill", "i can ",
-        "interested in",
-    ))
 
 
 # =========================
@@ -269,14 +148,6 @@ def _resolve_and_verify_owner(
                 detail="Access denied: Cannot access or manipulate resources belonging to another user.",
             )
     return authenticated_id
-
-
-def _get_owner_id(request_user_id: Optional[str] = None) -> str:
-    """Resolve authoritative owner id for task/reminder isolation."""
-    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip() or "boss_user"
-    if request_user_id and request_user_id.strip():
-        return request_user_id.strip()
-    return boss_id
 
 
 def get_temporal_context():
@@ -517,6 +388,15 @@ def validate_startup_security_config() -> None:
         logger.critical(msg)
         raise RuntimeError(msg)
 
+    # Reject LLM_ROUTER_MOCK=true in production/Render environments
+    is_mock = os.getenv("LLM_ROUTER_MOCK", "false").lower() == "true"
+    env = os.getenv("ENVIRONMENT", "").lower()
+    is_prod = env in {"production", "prod", "staging"} or os.getenv("RENDER", "").lower() == "true"
+    if is_mock and is_prod:
+        msg = "[SEC-MOCK-01 FATAL] Mock mode (LLM_ROUTER_MOCK=true) cannot be enabled in production or Render environments."
+        logger.critical(msg)
+        raise RuntimeError(msg)
+
 
 # Execute fail-fast security validation on module load
 validate_startup_security_config()
@@ -548,7 +428,12 @@ async def get_current_authenticated_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip() or "boss_user"
+    boss_id = os.getenv("VENNELA_BOSS_ID", "").strip()
+    if not boss_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Server security configuration error: VENNELA_BOSS_ID is unconfigured.",
+        )
     return AuthenticatedUser(user_id=boss_id, is_boss=True, role="boss")
 
 
@@ -664,7 +549,7 @@ class IntentResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., min_length=1, max_length=8192, description="User prompt message")
     user_id: Optional[str] = None
     session_id: Optional[str] = None
     messages: Optional[List[Dict[str, str]]] = None
@@ -704,6 +589,7 @@ class ChatResponse(BaseModel):
     request_id: str
     actions: List[AgentActionResponse] = Field(default_factory=list)
     action_results: List[ActionResultResponse] = Field(default_factory=list)
+    memory_status: Optional[str] = None
 
 
 class TaskCreateRequest(BaseModel):
@@ -847,8 +733,79 @@ async def root():
 
 @app.get("/health", tags=["health"])
 async def health():
-    """Health check endpoint."""
-    return {"status": "healthy", "lightweight_mode": LIGHTWEIGHT_MODE}
+    """Health check endpoint (liveness)."""
+    mem_mode = "unknown"
+    mem_status = "unknown"
+    try:
+        subsystem = get_memory_subsystem()
+        mem_mode = subsystem.mode.value
+        mem_status = getattr(subsystem, "memory_status", "healthy")
+    except Exception:
+        mem_mode = "error"
+        mem_status = "degraded"
+    return {
+        "status": "healthy",
+        "lightweight_mode": LIGHTWEIGHT_MODE,
+        "brain": "brain_b_langgraph",
+        "memory_mode": mem_mode,
+        "memory_status": mem_status,
+    }
+
+
+@app.get("/ready", tags=["health"])
+async def ready():
+    """Readiness probe verifying required Brain B memory subsystem connectivity."""
+    try:
+        subsystem = get_memory_subsystem()
+        if subsystem is None:
+            raise RuntimeError("Memory subsystem is unavailable")
+        mem_mode = subsystem.mode.value
+        boss_id = os.getenv("VENNELA_BOSS_ID", "").strip() or None
+        check_fn = getattr(subsystem, "check_readiness", None)
+        if callable(check_fn):
+            if "owner_id" in inspect.signature(check_fn).parameters:
+                is_ready, details = await asyncio.to_thread(check_fn, owner_id=boss_id)
+            else:
+                is_ready, details = await asyncio.to_thread(check_fn)
+        else:
+            is_ready, details = True, {"memory_status": "healthy"}
+    except Exception as exc:
+        logger.warning("Readiness check failed (%s)", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "brain": "brain_b_langgraph",
+                "memory_mode": "error",
+                "memory_status": "degraded",
+            },
+        )
+
+    mem_status = details.get("memory_status", "healthy" if is_ready else "degraded")
+    if not is_ready or mem_status == "degraded":
+        not_ready_payload: Dict[str, Any] = {
+            "status": "not_ready",
+            "brain": "brain_b_langgraph",
+            "memory_mode": mem_mode,
+            "memory_status": "degraded",
+        }
+        if details.get("reason"):
+            not_ready_payload["reason"] = details["reason"]
+        return JSONResponse(
+            status_code=503,
+            content=not_ready_payload,
+        )
+
+    ready_payload: Dict[str, Any] = {
+        "status": "ready",
+        "brain": "brain_b_langgraph",
+        "memory_mode": mem_mode,
+        "memory_status": mem_status,
+    }
+    for safe_key in ("memory_enabled", "owner_scoped", "owner_records_present"):
+        if safe_key in details:
+            ready_payload[safe_key] = details[safe_key]
+    return ready_payload
 
 
 @app.post("/embed", response_model=EmbeddingResponse, tags=["embeddings"])
@@ -1281,7 +1238,12 @@ async def cancel_reminder(
 # CHAT ENDPOINTS
 # =========================
 
-@app.post("/chat", response_model=ChatResponse, tags=["chat"])
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    response_model_exclude_none=True,
+    tags=["chat"],
+)
 async def chat(
     request: ChatRequest,
     http_request: Request,
@@ -1341,43 +1303,34 @@ async def chat(
             action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
             return ChatResponse(response=action_resp, request_id=chat_request_id)
 
-        # 2. Memory is scoped to the authenticated Boss identity.
-        memory_api = None
-        memory_context = None
-        memories = []
-        stable_memories = []
-        try:
-            memory_context = _basic_memory_context(request.session_id, user_id=owner_id)
-            memory_api = _basic_memory_api()
-            stable_started = time.perf_counter()
-            stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
-            timing["memory_stable_count"] = len(stable_memories)
-            timing["memory_stable_ms"] = round(
-                (time.perf_counter() - stable_started) * 1000, 3
-            )
-            relevant_started = time.perf_counter()
-            memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
-            timing["memory_relevant_count"] = len(memories)
-            timing["memory_relevant_ms"] = round(
-                (time.perf_counter() - relevant_started) * 1000, 3
-            )
-            logger.info(
-                "Chat memory retrieval: stable=%d relevant=%d duration_ms=%.3f",
-                len(stable_memories),
-                len(memories),
-                (time.perf_counter() - request_started) * 1000,
-            )
-        except Exception as memory_error:
-            memories = []
-            stable_memories = []
-            logger.warning(
-                "Chat memory retrieval unavailable: %s: %s duration_ms=%.3f",
-                type(memory_error).__name__,
-                memory_error,
-                (time.perf_counter() - request_started) * 1000,
-            )
+        # 2. Memory Subsystem: Canonical interface (Stateless, Temporary MARK-I, or future MARK-II)
+        mem_subsystem = get_memory_subsystem()
+        mem_response = await asyncio.to_thread(
+            mem_subsystem.retrieve,
+            MemoryRetrievalRequest(
+                query=request.message,
+                user_id=owner_id,
+                session_id=request.session_id,
+                metadata={"request_id": chat_request_id},
+            ),
+        )
+        mem_status = mem_response.metadata.get(
+            "memory_status", getattr(mem_subsystem, "memory_status", "healthy")
+        )
+        timing["memory_mode"] = mem_response.mode.value
+        timing["memory_status"] = mem_status
+        timing["memory_stable_count"] = mem_response.metadata.get("stable_count", 0)
+        timing["memory_relevant_count"] = mem_response.metadata.get("relevant_count", len(mem_response.context_strings))
+        timing["memory_stable_ms"] = 0.0
+        timing["memory_relevant_ms"] = mem_response.duration_ms
 
-        retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
+        retrieved_context = "\n".join(mem_response.context_strings) if mem_status != "degraded" else ""
+        logger.info(
+            "Memory subsystem evaluated: mode=%s count=%d request_id=%s",
+            mem_response.mode.value,
+            mem_response.memory_count,
+            chat_request_id,
+        )
 
         # Read personality from environment (keep existing prompts unchanged)
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
@@ -1450,24 +1403,31 @@ async def chat(
                 )
             text = brain_result.response
 
-            # 5. Store to Smart Memory if configured
-            if memory_api is not None and memory_context is not None:
-                persistence_started = time.perf_counter()
-                try:
-                    from memory import SmartMemory
-                    memory_decision = SmartMemory(memory_api).store(
-                        memory_context, request.message, domain="boss_personal", existing=memories,
-                    )
-                    if memory_decision.action in {"create", "update"} and memory_decision.record is None:
-                        raise RuntimeError("Basic memory store returned no saved record")
-                except Exception as store_err:
-                    logger.warning("SmartMemory store warning: %s", store_err)
-                finally:
-                    timing["persistence_ms"] = round(
-                        (time.perf_counter() - persistence_started) * 1000, 3
-                    )
+            # 5. Store to memory subsystem after successful Brain B validation (no-op in stateless mode)
+            persistence_started = time.perf_counter()
+            try:
+                await asyncio.to_thread(
+                    mem_subsystem.store,
+                    request.message,
+                    user_id=owner_id,
+                    session_id=request.session_id,
+                    metadata={"store_session": True, "request_id": chat_request_id},
+                )
+            except Exception as store_err:
+                mem_status = "degraded"
+                logger.warning("Memory store warning (%s)", type(store_err).__name__)
+            finally:
+                if getattr(mem_subsystem, "memory_status", "healthy") == "degraded":
+                    mem_status = "degraded"
+                timing["persistence_ms"] = round(
+                    (time.perf_counter() - persistence_started) * 1000, 3
+                )
 
-            return ChatResponse(response=text, request_id=chat_request_id)
+            return ChatResponse(
+                response=text,
+                request_id=chat_request_id,
+                memory_status="degraded" if mem_status == "degraded" else None,
+            )
 
         except RoutingError as exc:
             timing["status"] = "failed"
@@ -1529,6 +1489,39 @@ async def chat(
         )
 
 
+_STREAM_END = object()
+
+
+class _ClientDisconnectedError(Exception):
+    """Internal signal raised when an HTTP streaming client disconnects."""
+
+
+def _close_iterator(iterator: Any) -> None:
+    """Close a synchronous stream iterator when it exposes a close hook."""
+    close_fn = getattr(iterator, "close", None)
+    if callable(close_fn):
+        close_fn()
+
+
+def _next_stream_chunk(iterator: Any) -> Any:
+    """Pull the next chunk from a synchronous stream iterator."""
+    return next(iterator, _STREAM_END)
+
+
+async def _await_with_disconnect(
+    task: asyncio.Task[Any],
+    http_request: Request,
+    poll_interval: float = 0.05,
+) -> Any:
+    """Wait for a thread-offloaded task while polling client disconnect state."""
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=poll_interval)
+        if done:
+            return task.result()
+        if await http_request.is_disconnected():
+            raise _ClientDisconnectedError()
+
+
 @app.post("/chat/stream", tags=["chat"])
 async def chat_stream(
     request: ChatRequest,
@@ -1553,25 +1546,27 @@ async def chat_stream(
             action_resp = execute_nexus_intent(intent_res, task_mgr, rem_mgr, owner_id, temporal)
             return StreamingResponse(iter([action_resp]), media_type="text/plain; charset=utf-8")
 
-        # Build memory context & personality
-        retrieved_context = ""
-        try:
-            memory_context = _basic_memory_context(request.session_id, user_id=owner_id)
-            memory_api = _basic_memory_api()
-            stable_memories = _retrieve_stable_chat_memories(memory_context, memory_api)
-            memories = _retrieve_chat_memories(memory_context, memory_api, request.message)
-            logger.info(
-                "Streaming memory retrieval: stable=%d relevant=%d",
-                len(stable_memories),
-                len(memories),
-            )
-            retrieved_context = _build_chat_memory_instruction(stable_memories, memories)
-        except Exception as memory_error:
-            logger.warning(
-                "Streaming memory retrieval unavailable: %s: %s",
-                type(memory_error).__name__,
-                memory_error,
-            )
+        # Build memory context & personality via canonical memory subsystem
+        mem_subsystem = get_memory_subsystem()
+        mem_response = await asyncio.to_thread(
+            mem_subsystem.retrieve,
+            MemoryRetrievalRequest(
+                query=request.message,
+                user_id=owner_id,
+                session_id=request.session_id,
+                metadata={"request_id": chat_request_id},
+            ),
+        )
+        retrieved_context = (
+            "\n".join(mem_response.context_strings)
+            if mem_response.metadata.get("memory_status") != "degraded"
+            else ""
+        )
+        stream_headers = (
+            {"X-Memory-Status": "degraded"}
+            if mem_response.metadata.get("memory_status") == "degraded"
+            else {}
+        )
 
         VENNELA_PERSONALITY = os.getenv("VENNELA_PERSONALITY", "")
         VENNELA_PROMPT = os.getenv("VENNELA_PROMPT", "")
@@ -1596,18 +1591,129 @@ async def chat_stream(
 
         adapter = get_llm_adapter()
 
-        def token_generator():
+        async def token_generator():
+            stream_iter: Any = None
+            in_flight_task: asyncio.Task[Any] | None = None
+            has_output = False
+            clean_eof = False
+            disconnected = False
+            cancelled = False
+            stream_failed = False
+
+            def _start_stream():
+                return iter(
+                    adapter.stream_text(
+                        request.message,
+                        system_instruction=policy.system_instruction,
+                        messages=conversation_messages,
+                        latency_sensitive=policy.latency_sensitive,
+                        max_tokens=policy.max_tokens,
+                        request_id=chat_request_id,
+                    )
+                )
+
             try:
-                for token in adapter.stream_text(
-                    request.message,
-                    system_instruction=policy.system_instruction,
-                    messages=conversation_messages,
-                    latency_sensitive=policy.latency_sensitive,
-                    max_tokens=policy.max_tokens,
-                    request_id=chat_request_id,
+                if await http_request.is_disconnected():
+                    disconnected = True
+                    log_event(
+                        "request",
+                        "chat_stream_disconnected",
+                        request_id=chat_request_id,
+                        session_id=request.session_id,
+                    )
+                    return
+
+                in_flight_task = asyncio.create_task(asyncio.to_thread(_start_stream))
+                stream_iter = await _await_with_disconnect(in_flight_task, http_request)
+                in_flight_task = None
+
+                while True:
+                    if await http_request.is_disconnected():
+                        disconnected = True
+                        log_event(
+                            "request",
+                            "chat_stream_disconnected",
+                            request_id=chat_request_id,
+                            session_id=request.session_id,
+                        )
+                        break
+
+                    in_flight_task = asyncio.create_task(
+                        asyncio.to_thread(_next_stream_chunk, stream_iter)
+                    )
+                    token = await _await_with_disconnect(in_flight_task, http_request)
+                    in_flight_task = None
+
+                    if token is _STREAM_END:
+                        if await http_request.is_disconnected():
+                            disconnected = True
+                            log_event(
+                                "request",
+                                "chat_stream_disconnected",
+                                request_id=chat_request_id,
+                                session_id=request.session_id,
+                            )
+                        else:
+                            clean_eof = True
+                        break
+
+                    if await http_request.is_disconnected():
+                        disconnected = True
+                        log_event(
+                            "request",
+                            "chat_stream_disconnected",
+                            request_id=chat_request_id,
+                            session_id=request.session_id,
+                        )
+                        break
+
+                    if token:
+                        if str(token).strip():
+                            has_output = True
+                        yield token
+
+                # Persist turn strictly after verified clean EOF without cancellation or disconnect
+                if (
+                    clean_eof
+                    and not disconnected
+                    and not cancelled
+                    and not stream_failed
+                    and has_output
                 ):
-                    yield token
+                    try:
+                        await asyncio.to_thread(
+                            mem_subsystem.store,
+                            request.message,
+                            user_id=owner_id,
+                            session_id=request.session_id,
+                            metadata={"store_session": True, "request_id": chat_request_id},
+                        )
+                    except Exception as store_err:
+                        logger.warning("Streaming memory store warning (%s)", type(store_err).__name__)
+
+            except _ClientDisconnectedError:
+                disconnected = True
+                log_event(
+                    "request",
+                    "chat_stream_disconnected",
+                    request_id=chat_request_id,
+                    session_id=request.session_id,
+                )
+                return
+            except asyncio.CancelledError:
+                cancelled = True
+                log_event(
+                    "request",
+                    "chat_stream_cancelled",
+                    request_id=chat_request_id,
+                    session_id=request.session_id,
+                )
+                raise
+            except GeneratorExit:
+                cancelled = True
+                raise
             except Exception as exc:
+                stream_failed = True
                 log_failure(
                     "router",
                     "stream_failed",
@@ -1615,13 +1721,65 @@ async def chat_stream(
                     request_id=chat_request_id,
                     session_id=request.session_id,
                 )
-                yield "\n[AI service temporarily unavailable]"
+                if not await http_request.is_disconnected():
+                    yield "\n[AI service temporarily unavailable]"
+            finally:
+                if in_flight_task is not None and not in_flight_task.done():
+                    def _cleanup_after_task(
+                        completed: asyncio.Task[Any],
+                        active_iter: Any = stream_iter,
+                    ) -> None:
+                        target = active_iter
+                        if not completed.cancelled():
+                            exc: BaseException | None = None
+                            with contextlib.suppress(BaseException):
+                                exc = completed.exception()
+                            if exc is None and target is None:
+                                with contextlib.suppress(BaseException):
+                                    target = completed.result()
+                        if target is not None:
+                            with contextlib.suppress(Exception):
+                                _close_iterator(target)
 
-        return StreamingResponse(token_generator(), media_type="text/plain; charset=utf-8")
+                    in_flight_task.add_done_callback(_cleanup_after_task)
+                elif stream_iter is not None:
+                    with contextlib.suppress(Exception):
+                        _close_iterator(stream_iter)
 
-    except Exception as e:
-        logger.error(f"Chat stream setup error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return StreamingResponse(
+            token_generator(),
+            media_type="text/plain; charset=utf-8",
+            headers=stream_headers,
+        )
+
+    except HTTPException:
+        raise
+    except asyncio.CancelledError:
+        raise
+    except RoutingError as exc:
+        log_failure(
+            "router",
+            "chat_stream_routing_failed",
+            exc,
+            request_id=chat_request_id,
+            session_id=request.session_id,
+            error_kind=getattr(getattr(exc, "failure", None), "kind", "unknown"),
+        )
+        if FailureKind is not None and getattr(getattr(exc, "failure", None), "kind", None) in {
+            FailureKind.NO_API_KEY,
+            FailureKind.AUTHENTICATION,
+        }:
+            raise HTTPException(status_code=401, detail="LLM authentication failed")
+        raise HTTPException(status_code=503, detail="AI services temporarily unavailable. Please try again later.")
+    except Exception as exc:
+        log_failure(
+            "request",
+            "/chat_stream_failed",
+            exc,
+            request_id=chat_request_id,
+            session_id=request.session_id,
+        )
+        raise HTTPException(status_code=500, detail="Internal AI error")
 
 
 @app.get("/router/health", tags=["router"])
@@ -1827,12 +1985,21 @@ async def global_exception_handler(request, exc):
 # STARTUP/SHUTDOWN
 # =========================
 
+def validate_memory_startup() -> None:
+    """Validate and probe the configured memory subsystem during application startup."""
+    mem_subsystem = get_memory_subsystem()
+    validate_fn = getattr(mem_subsystem, "validate_startup", None)
+    if callable(validate_fn):
+        validate_fn()
+
+
 @app.on_event("startup")
 async def startup_event():
     """Run on startup."""
     logger.info("Vennela AI starting up...")
     logger.info(f"Lightweight mode: {LIGHTWEIGHT_MODE}")
     logger.info(f"Python runtime: {sys.version.split()[0]}")
+    await asyncio.to_thread(validate_memory_startup)
     try:
         scheduler = get_reminder_scheduler()
         await scheduler.start()

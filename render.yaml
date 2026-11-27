@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: vennela-a-i
+    runtime: python
+    plan: free
+    rootDir: MARK II/Backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT app:app
+    envVars:
+      # Mandatory Security Configuration (SEC-02, SEC-03, SEC-05)
+      - key: VENNELA_BOSS_ID
+        sync: false
+      - key: VENNELA_AGENT_TOKEN
+        sync: false
+      - key: VENNELA_CORS_ORIGINS
+        value: https://vennela-a-i.onrender.com,https://vennela.ai
+      # LLM Provider Secrets
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Database & Storage
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      # Web Intelligence & Search
+      - key: TAVILY_API_KEY
+        sync: false
+      # Telegram Bot
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_CHAT_IDS
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: TELEGRAM_WEBHOOK_URL
+        value: https://vennela-a-i.onrender.com/telegram/webhook
+      # Runtime Flags
+      - key: LIGHTWEIGHT_MODE
+        value: "true"
+      - key: VENNELA_CHAT_ENABLED
+        value: "true"
+      - key: VENNELA_MEMORY_PROVIDER
+        value: "mark_i"
+      - key: VENNELA_MEMORY_ENABLED
+        value: "true"
+      - key: LLM_ROUTER_MOCK
+        value: "false"
+      - key: VENNELA_API_BASE_URL
+        value: https://vennela-a-i.onrender.com
+      - key: VENNELA_TIMEZONE
+        value: Asia/Kolkata
