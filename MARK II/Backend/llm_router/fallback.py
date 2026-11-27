@@ -240,7 +240,13 @@ class FallbackEngine:
             attempt_start = time.perf_counter()
             try:
                 stream_iter = provider.stream(request, model_id)
-                first_chunk = next(stream_iter)
+                try:
+                    first_chunk = next(stream_iter)
+                except Exception:
+                    close_fn = getattr(stream_iter, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+                    raise
                 attempt_latency = (time.perf_counter() - attempt_start) * 1000.0
 
                 if tracker:
@@ -252,10 +258,15 @@ class FallbackEngine:
 
                 self.health.record_success(provider_name, attempt_latency, model_id)
 
-                def _generator():
-                    yield first_chunk
-                    for chunk in stream_iter:
-                        yield chunk
+                def _generator(active_stream=stream_iter, head=first_chunk):
+                    try:
+                        yield head
+                        for chunk in active_stream:
+                            yield chunk
+                    finally:
+                        close_fn = getattr(active_stream, "close", None)
+                        if callable(close_fn):
+                            close_fn()
 
                 return _generator()
 

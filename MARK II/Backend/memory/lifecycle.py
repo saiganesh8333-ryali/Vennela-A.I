@@ -76,7 +76,8 @@ class MemoryLifecycleManager:
         if not isinstance(memory_id, str) or not memory_id.strip():
             raise ValueError("memory_id is required")
 
-        record = self.api.repository.get(memory_id.strip())
+        authorize(context, MemoryDomain.BOSS_PERSONAL)
+        record = self.api._get_for_context(context, memory_id.strip())
         if record is None:
             raise MemoryNotFoundError(f"memory not found: {memory_id}")
 
@@ -122,7 +123,7 @@ class MemoryLifecycleManager:
             updated_at=now,
             active=new_active,
         )
-        return self.api.repository.update(updated_record)
+        return self.api.repository.update(updated_record, owner_id=context.user_id)
 
     def mark_obsolete(
         self,

@@ -37,9 +37,9 @@ def merge_states(left: VennelaState, right: VennelaState) -> VennelaState:
     data["tool_results"] = {**data["tool_results"], **right_data["tool_results"]}
     data["attempts"] = {**data["attempts"], **right_data["attempts"]}
     data["fusion_context"] = {**data["fusion_context"], **right_data["fusion_context"]}
-    for field in ("canonical_intent", "execution_plan", "selected_agents", "status", "response",
-                  "response_metadata", "plan_id", "plan_details", "plan_steps",
-                  "dependencies", "parallel_groups"):
+    for field in ("canonical_intent", "execution_plan", "selected_agents", "memory_context",
+                  "status", "response", "response_metadata", "plan_id", "plan_details",
+                  "plan_steps", "dependencies", "parallel_groups"):
         if right_data[field] not in (None, [], {}, "created"):
             data[field] = right_data[field]
     return VennelaState.model_validate(data)
@@ -170,16 +170,17 @@ class LangGraphBrain(PlainBrain):
         return graph
 
     def run(self, request: str, session_id: str = "lab-session", user_id=None,
-            messages=None, memory_context=None, request_id=None) -> VennelaState:
+            messages=None, memory_context=None, request_id=None, config=None) -> VennelaState:
         initial = VennelaState(
             request_id=request_id or str(uuid4()),
             original_request=request,
             session_id=session_id,
             user_id=user_id,
-            messages=messages or [{"role": "user", "content": request}],
-            memory_context=memory_context or [],
+            messages=list(messages) if messages else [{"role": "user", "content": request}],
+            memory_context=list(memory_context) if memory_context else [],
         )
-        result = self.compiled_graph.invoke({"brain_state": initial})
+        invoke_kwargs = {"config": config} if config is not None else {}
+        result = self.compiled_graph.invoke({"brain_state": initial}, **invoke_kwargs)
         return result["brain_state"]
 
     def stream(self, request: str, session_id: str = "lab-session", user_id=None):

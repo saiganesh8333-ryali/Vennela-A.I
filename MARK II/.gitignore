@@ -68,6 +68,20 @@ out/
 .vite/
 
 # --- Android ---
+# Android compiled artifacts
+*.apk
+*.aab
+
+# Android build outputs
+**/build/
+**/.gradle/
+**/.kotlin/
+**/outputs/
+
+# Local Android configuration
+local.properties
+
+# Legacy / explicit Android paths
 Android/.gradle/
 Android/build/
 Android/*/build/
@@ -76,6 +90,7 @@ Android/*.apk
 Android/*.aab
 Android/.idea/
 Android/*.iml
+Android/*/*.iml
 Android/app/*.iml
 Android/captures/
 Android/.externalNativeBuild/

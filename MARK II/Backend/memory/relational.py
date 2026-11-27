@@ -117,8 +117,9 @@ class RelationalMemory:
     ) -> MemoryRecord:
         if not isinstance(memory_id, str) or not memory_id.strip():
             raise ValueError(f"{label}_memory_id is required")
+        authorize(context, MemoryDomain.BOSS_PERSONAL)
         clean_id = memory_id.strip()
-        record = self.api.repository.get(clean_id)
+        record = self.api._get_for_context(context, clean_id)
         if record is None or not record.active:
             raise MemoryNotFoundError(f"{label} memory not found: {clean_id}")
         authorize(context, record.domain, record.session_id, record)
@@ -393,7 +394,7 @@ class RelationalMemory:
                     continue
 
                 # Validate neighbor existence and authorization
-                neighbor_record = self.api.repository.get(neighbor_id)
+                neighbor_record = self.api._get_for_context(context, neighbor_id)
                 if neighbor_record is None or not neighbor_record.active:
                     continue
                 try:

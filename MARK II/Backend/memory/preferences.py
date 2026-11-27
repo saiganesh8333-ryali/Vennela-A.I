@@ -96,7 +96,7 @@ class PreferenceEvolutionEngine:
                 # Collect any older superseded records from old_rec
                 if isinstance(old_rec.content, dict):
                     for prev_id in old_rec.content.get("supersedes", []):
-                        prev_rec = self.api.repository.get(prev_id)
+                        prev_rec = self.api._get_for_context(context, prev_id)
                         if prev_rec is not None and prev_rec not in historical:
                             historical.append(prev_rec)
 
@@ -210,7 +210,7 @@ class PreferenceEvolutionEngine:
             if sid in visited_ids:
                 continue
             visited_ids.add(sid)
-            s_rec = self.api.repository.get(sid)
+            s_rec = self.api._get_for_context(context, sid)
             if s_rec is not None:
                 authorize(context, s_rec.domain, s_rec.session_id, s_rec)
                 historical.append(s_rec)

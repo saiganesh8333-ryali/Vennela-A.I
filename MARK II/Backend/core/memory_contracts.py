@@ -14,12 +14,15 @@ Architecture & Isolation Rules:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import base64
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 import logging
 import os
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +124,19 @@ class MemorySubsystemInterface(ABC):
         """Return the active isolation mode."""
         pass
 
+    @property
+    def memory_status(self) -> str:
+        """Return runtime memory availability ('healthy' or 'degraded')."""
+        return "healthy"
+
+    def validate_startup(self) -> None:
+        """Perform startup configuration and connectivity validation."""
+        return None
+
+    def check_readiness(self) -> Tuple[bool, Dict[str, Any]]:
+        """Check dependency readiness without raising into HTTP handlers."""
+        return True, {"memory_status": self.memory_status}
+
 
 class StatelessMemoryProvider(MemorySubsystemInterface):
     """Explicitly isolated stateless provider for Brain B.
@@ -164,6 +180,14 @@ class StatelessMemoryProvider(MemorySubsystemInterface):
     def mode(self) -> MemoryIsolationMode:
         return MemoryIsolationMode.STATELESS_ISOLATED
 
+    def check_readiness(self) -> Tuple[bool, Dict[str, Any]]:
+        """Report intentional stateless isolation without claiming live DB failure."""
+        return True, {
+            "memory_status": "disabled",
+            "memory_mode": self.mode.value,
+            "memory_enabled": False,
+        }
+
 
 def _extract_record_text(record: Any) -> str:
     content = getattr(record, "content", None)
@@ -184,6 +208,49 @@ def _require_user_id(user_id: Optional[str], operation: str) -> str:
     return clean
 
 
+def _is_production_environment() -> bool:
+    """Return True when executing in a deployed production/staging/Render environment."""
+    env = os.getenv("ENVIRONMENT", "").strip().lower()
+    return (
+        env in {"production", "prod", "staging"}
+        or os.getenv("RENDER", "").strip().lower() == "true"
+    )
+
+
+def _warn_if_anon_supabase_key(key: str) -> None:
+    """Safely warn when SUPABASE_KEY looks like an anon JWT without ever logging any secret."""
+    parts = key.split(".")
+    if len(parts) != 3:
+        return
+    try:
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = base64.urlsafe_b64decode(payload_b64.encode("ascii"))
+        claims = json.loads(decoded.decode("utf-8"))
+        role = str(claims.get("role", "")).strip().lower()
+        if role and role != "service_role":
+            logger.warning(
+                "SUPABASE_KEY appears to use JWT role='%s'; public.memories has RLS enabled with 0 policies "
+                "and requires the server-side service_role key.",
+                role,
+            )
+    except Exception:
+        return
+
+
+def _log_zero_rows_warning(owner_id: str, *, context: str) -> None:
+    """Emit a privacy-safe warning explaining possible causes of a zero-row memory query."""
+    logger.warning(
+        "MARK-I Supabase memory query returned 0 rows (context=%s owner_id_queried=%s). "
+        "Possible causes: (1) incorrect SUPABASE_KEY configuration, "
+        "(2) anon/public key used instead of service_role key with RLS enabled, "
+        "(3) VENNELA_BOSS_ID mismatch with existing owner_id values in public.memories, "
+        "(4) incorrect provider or memory configuration, or "
+        "(5) an actually empty result set.",
+        context,
+        owner_id,
+    )
+
+
 class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
     """Temporary operational memory provider adapting MARK-I memory to Brain B.
 
@@ -193,24 +260,50 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
     - Session-scoped short-term memory retrieval/storage when session_id is supplied.
     - Conversation turn persistence & deduplication via SmartMemory.
     - Strict AuthContext user and session isolation enforcing ownership on all operations.
-    - Graceful degradation if Supabase is unreachable or unconfigured.
+    - Fail-fast production startup validation with explicit Supabase timeouts and
+      lightweight connectivity probe (never silently falling back to volatile memory).
+    - Controlled degraded-mode stateless Brain B operation with automatic recovery.
     """
 
     def __init__(self, api_factory: Optional[Callable[[], Any]] = None):
         self._api_factory = api_factory
         self._api_instance: Optional[Any] = None
+        self._state_lock = threading.Lock()
+        self._probe_lock = threading.Lock()
+        self._status: str = "healthy"
+        self._last_error: Optional[str] = None
 
     @property
     def mode(self) -> MemoryIsolationMode:
         return MemoryIsolationMode.MARK_I_TEMPORARY
 
+    @property
+    def memory_status(self) -> str:
+        with self._state_lock:
+            return self._status
+
+    def _mark_healthy(self) -> None:
+        with self._state_lock:
+            self._status = "healthy"
+            self._last_error = None
+
+    def _mark_degraded(self, err: BaseException) -> None:
+        with self._state_lock:
+            self._status = "degraded"
+            self._last_error = type(err).__name__
+
     def _get_api(self) -> Any:
-        if self._api_instance is None:
-            if self._api_factory is not None:
-                self._api_instance = self._api_factory()
-            else:
-                self._api_instance = self._default_api_factory()
-        return self._api_instance
+        with self._state_lock:
+            cached = self._api_instance
+        if cached is not None:
+            return cached
+
+        factory = self._api_factory or self._default_api_factory
+        api = factory()
+        with self._state_lock:
+            if self._api_instance is None:
+                self._api_instance = api
+            return self._api_instance
 
     @staticmethod
     def _default_api_factory() -> Any:
@@ -220,23 +313,140 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
         url = os.getenv("SUPABASE_URL", "").strip()
         key = os.getenv("SUPABASE_KEY", "").strip()
         if url and key:
-            from supabase import create_client
+            from supabase import ClientOptions, create_client
 
-            return MemoryAPI(SupabaseMemoryRepository(create_client(url, key)))
+            _warn_if_anon_supabase_key(key)
+            options = ClientOptions(
+                postgrest_client_timeout=10,
+                storage_client_timeout=10,
+            )
+            client = create_client(url, key, options=options)
+            return MemoryAPI(SupabaseMemoryRepository(client))
+
+        if _is_production_environment():
+            msg = (
+                "[P0-02 FATAL] SUPABASE_URL and SUPABASE_KEY are required when "
+                "VENNELA_MEMORY_PROVIDER=mark_i in production/Render environments."
+            )
+            logger.critical(msg)
+            raise RuntimeError(msg)
+
         logger.warning(
-            "SUPABASE_URL/SUPABASE_KEY not configured; TemporaryMarkIMemoryProvider using InMemoryMemoryRepository"
+            "SUPABASE_URL/SUPABASE_KEY not configured in non-production environment; "
+            "TemporaryMarkIMemoryProvider using InMemoryMemoryRepository"
         )
         return MemoryAPI(InMemoryMemoryRepository())
+
+    def _probe_api(
+        self,
+        api: Any,
+        *,
+        owner_id: Optional[str] = None,
+        verify_owner_query: bool = False,
+    ) -> Dict[str, Any]:
+        from memory.repository import InMemoryMemoryRepository, SupabaseMemoryRepository
+
+        repo = getattr(api, "repository", None)
+        if isinstance(repo, InMemoryMemoryRepository):
+            if _is_production_environment() and self._api_factory is None:
+                raise RuntimeError(
+                    "[P0-02 FATAL] Volatile InMemoryMemoryRepository is prohibited in production."
+                )
+            if verify_owner_query and self._api_factory is None:
+                raise RuntimeError(
+                    "SUPABASE_URL and SUPABASE_KEY are required to verify live MARK-I memory readiness."
+                )
+            return {"memory_enabled": True, "owner_scoped": False}
+
+        client = getattr(repo, "client", None)
+        table_name = getattr(repo, "table_name", "memories")
+        if client is not None and hasattr(client, "table"):
+            resp = client.table(table_name).select("memory_id").limit(1).execute()
+            SupabaseMemoryRepository._check(resp)
+
+            details: Dict[str, Any] = {"memory_enabled": True, "owner_scoped": False}
+            if verify_owner_query:
+                effective_owner = (owner_id or os.getenv("VENNELA_BOSS_ID", "")).strip()
+                if effective_owner:
+                    owner_resp = (
+                        client.table(table_name)
+                        .select("memory_id")
+                        .eq("owner_id", effective_owner)
+                        .limit(1)
+                        .execute()
+                    )
+                    owner_rows = SupabaseMemoryRepository._check(owner_resp)
+                    owner_records_present = len(owner_rows) > 0
+                    if not owner_records_present:
+                        _log_zero_rows_warning(effective_owner, context="readiness_probe")
+                    details["owner_scoped"] = True
+                    details["owner_records_present"] = owner_records_present
+            return details
+
+        raise RuntimeError("Configured memory repository does not expose a Supabase client")
+
+    def validate_startup(self) -> None:
+        """Fail fast at startup if credentials are missing or connectivity probe fails."""
+        with self._probe_lock:
+            try:
+                api = self._get_api()
+                self._probe_api(api)
+                self._mark_healthy()
+            except Exception as exc:
+                self._mark_degraded(exc)
+                logger.critical(
+                    "MARK-I startup validation/connectivity probe failed (%s)",
+                    type(exc).__name__,
+                )
+                raise RuntimeError(
+                    f"[P0-02 FATAL] MARK-I memory startup validation failed ({type(exc).__name__})."
+                ) from exc
+
+    def check_readiness(self, owner_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
+        """Probe configured memory backend and update status without crashing /ready."""
+        with self._probe_lock:
+            try:
+                api = self._get_api()
+                probe_details = self._probe_api(
+                    api,
+                    owner_id=owner_id,
+                    verify_owner_query=True,
+                )
+                self._mark_healthy()
+                return True, {
+                    "memory_status": "healthy",
+                    "memory_mode": self.mode.value,
+                    **probe_details,
+                }
+            except Exception as exc:
+                self._mark_degraded(exc)
+                logger.warning(
+                    "MARK-I readiness probe failed (%s); reporting degraded status",
+                    type(exc).__name__,
+                )
+                details: Dict[str, Any] = {
+                    "memory_status": "degraded",
+                    "memory_mode": self.mode.value,
+                    "memory_enabled": True,
+                    "error_type": type(exc).__name__,
+                }
+                if "SUPABASE_URL and SUPABASE_KEY are required" in str(exc) or "P0-02 FATAL" in str(exc):
+                    details["reason"] = "missing_supabase_credentials"
+                return False, details
 
     def retrieve(self, request: MemoryRetrievalRequest) -> MemoryRetrievalResponse:
         clean_user = _require_user_id(request.user_id, "TemporaryMarkIMemoryProvider.retrieve")
         started = time.perf_counter()
+        request_id = (request.metadata or {}).get("request_id")
 
         try:
             from memory.intelligent import IntelligentMemory
             from memory.models import AuthContext, MemoryCategory, MemoryDomain
 
             api = self._get_api()
+            repo = getattr(api, "repository", None)
+            diag_fn = getattr(repo, "get_last_retrieval_diagnostics", None)
+
             auth_context = AuthContext(
                 user_id=clean_user,
                 authenticated=True,
@@ -249,6 +459,15 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                 session_id=None,
                 limit=50,
             )
+            personal_diag = diag_fn() if callable(diag_fn) else None
+            if isinstance(personal_diag, dict):
+                total_raw = int(personal_diag.get("raw_rows_fetched", len(all_personal)))
+                total_valid = int(personal_diag.get("valid_rows_parsed", len(all_personal)))
+                total_skipped = int(personal_diag.get("skipped_rows_count", 0))
+            else:
+                total_raw = len(all_personal)
+                total_valid = len(all_personal)
+                total_skipped = 0
 
             stable_categories = {
                 MemoryCategory.PROFILE,
@@ -299,11 +518,42 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                     query=request.query,
                     limit=max(1, min(request.limit, 5)),
                 )
+                session_diag = diag_fn() if callable(diag_fn) else None
+                if isinstance(session_diag, dict):
+                    total_raw += int(session_diag.get("raw_rows_fetched", len(session_records)))
+                    total_valid += int(session_diag.get("valid_rows_parsed", len(session_records)))
+                    total_skipped += int(session_diag.get("skipped_rows_count", 0))
+                else:
+                    total_raw += len(session_records)
+                    total_valid += len(session_records)
                 for rec in session_records:
                     txt = _extract_record_text(rec)
                     if txt and txt.lower() not in seen_stable_texts:
                         seen_stable_texts.add(txt.lower())
                         session_texts.append(txt)
+
+            if total_raw == 0:
+                retrieval_status = "empty"
+                _log_zero_rows_warning(clean_user, context="retrieve")
+            elif total_skipped > 0 and total_valid > 0:
+                retrieval_status = "partial_success"
+            elif total_skipped > 0 and total_valid == 0:
+                retrieval_status = "all_rows_invalid"
+            else:
+                retrieval_status = "success"
+
+            diag_event: Dict[str, Any] = {
+                "event": "mark_i_memory_retrieval",
+                "provider": "TemporaryMarkIMemoryProvider",
+                "owner_id_queried": clean_user,
+                "raw_rows_fetched": total_raw,
+                "valid_rows_parsed": total_valid,
+                "skipped_rows_count": total_skipped,
+                "status": retrieval_status,
+            }
+            if request_id is not None:
+                diag_event["request_id"] = str(request_id)
+            logger.info("mark_i_memory_retrieval %s", json.dumps(diag_event, sort_keys=True))
 
             context_lines: List[str] = []
             if stable_texts:
@@ -319,6 +569,7 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                 for t in session_texts:
                     context_lines.append(f"- {t}")
 
+            self._mark_healthy()
             return MemoryRetrievalResponse(
                 context_strings=context_lines,
                 memory_count=len(stable_texts) + len(relevant_texts) + len(session_texts),
@@ -328,16 +579,43 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                     "stable_count": len(stable_texts),
                     "relevant_count": len(relevant_texts),
                     "session_count": len(session_texts),
+                    "memory_status": "healthy",
+                    "owner_id_queried": clean_user,
+                    "raw_rows_fetched": total_raw,
+                    "valid_rows_parsed": total_valid,
+                    "skipped_rows_count": total_skipped,
+                    "retrieval_status": retrieval_status,
                 },
             )
         except Exception as ret_err:
-            logger.warning("MARK-I memory retrieval failed (%s): %s", type(ret_err).__name__, ret_err)
+            self._mark_degraded(ret_err)
+            fail_event: Dict[str, Any] = {
+                "event": "mark_i_memory_retrieval",
+                "provider": "TemporaryMarkIMemoryProvider",
+                "owner_id_queried": clean_user,
+                "raw_rows_fetched": 0,
+                "valid_rows_parsed": 0,
+                "skipped_rows_count": 0,
+                "status": "failed",
+                "error_type": type(ret_err).__name__,
+            }
+            if request_id is not None:
+                fail_event["request_id"] = str(request_id)
+            logger.warning("mark_i_memory_retrieval %s", json.dumps(fail_event, sort_keys=True))
             return MemoryRetrievalResponse(
                 context_strings=[],
                 memory_count=0,
                 mode=MemoryIsolationMode.MARK_I_TEMPORARY,
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                metadata={"error": type(ret_err).__name__, "status": "retrieval_failed"},
+                metadata={
+                    "error": type(ret_err).__name__,
+                    "status": "retrieval_failed",
+                    "memory_status": "degraded",
+                    "owner_id_queried": clean_user,
+                    "raw_rows_fetched": 0,
+                    "valid_rows_parsed": 0,
+                    "skipped_rows_count": 0,
+                },
             )
 
     def store(
@@ -394,9 +672,11 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                     )
                     stored_session = True
 
+            self._mark_healthy()
             return stored_personal or stored_session
         except Exception as err:
-            logger.warning("MARK-I temporary memory store warning (%s): %s", type(err).__name__, err)
+            self._mark_degraded(err)
+            logger.warning("MARK-I temporary memory store warning (%s)", type(err).__name__)
             return False
 
     def update(
@@ -422,9 +702,12 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                 session_id=clean_session,
             )
             api.update(auth_context, memory_id.strip(), content, category=category)
+            self._mark_healthy()
             return True
         except Exception as err:
-            logger.warning("MARK-I memory update warning (%s): %s", type(err).__name__, err)
+            if not isinstance(err, (KeyError, ValueError, PermissionError)):
+                self._mark_degraded(err)
+            logger.warning("MARK-I memory update warning (%s)", type(err).__name__)
             return False
 
     def delete(
@@ -447,13 +730,18 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                 authenticated=True,
                 session_id=clean_session,
             )
-            return bool(api.forget(auth_context, memory_id.strip()))
+            result = bool(api.forget(auth_context, memory_id.strip()))
+            self._mark_healthy()
+            return result
         except Exception as err:
-            logger.warning("MARK-I memory delete warning (%s): %s", type(err).__name__, err)
+            if not isinstance(err, (KeyError, ValueError, PermissionError)):
+                self._mark_degraded(err)
+            logger.warning("MARK-I memory delete warning (%s)", type(err).__name__)
             return False
 
 
 _memory_subsystem_instance: Optional[MemorySubsystemInterface] = None
+_memory_subsystem_lock = threading.Lock()
 
 # Strict provider allowlist
 ALLOWED_MEMORY_PROVIDERS = {"stateless", "mark_i", "mark_ii"}
@@ -471,46 +759,53 @@ def get_memory_subsystem() -> MemorySubsystemInterface:
     2. When VENNELA_MEMORY_PROVIDER is unset:
        - If VENNELA_MEMORY_ENABLED=true -> TemporaryMarkIMemoryProvider
        - Otherwise -> StatelessMemoryProvider
+    3. In production/Render with 'mark_i', validate credentials and connectivity
+       before caching or serving requests.
     """
     global _memory_subsystem_instance
-    if _memory_subsystem_instance is None:
-        raw_provider = os.getenv("VENNELA_MEMORY_PROVIDER", "").strip().lower()
-        memory_enabled = os.getenv("VENNELA_MEMORY_ENABLED", "false").strip().lower() == "true"
+    with _memory_subsystem_lock:
+        if _memory_subsystem_instance is None:
+            raw_provider = os.getenv("VENNELA_MEMORY_PROVIDER", "").strip().lower()
+            memory_enabled = os.getenv("VENNELA_MEMORY_ENABLED", "false").strip().lower() == "true"
 
-        if not raw_provider:
-            if memory_enabled:
-                logger.info("VENNELA_MEMORY_ENABLED=true with unset provider; activating 'mark_i'")
-                raw_provider = "mark_i"
+            if not raw_provider:
+                if memory_enabled:
+                    logger.info("VENNELA_MEMORY_ENABLED=true with unset provider; activating 'mark_i'")
+                    raw_provider = "mark_i"
+                else:
+                    logger.info("VENNELA_MEMORY_PROVIDER unset; defaulting deterministically to 'stateless'")
+                    raw_provider = "stateless"
+
+            if raw_provider not in ALLOWED_MEMORY_PROVIDERS:
+                raise ValueError(
+                    f"[SEC-MEM-INVALID-PROVIDER] Unknown memory provider '{raw_provider}'. "
+                    f"Strict allowlist: {sorted(list(ALLOWED_MEMORY_PROVIDERS))}."
+                )
+
+            if raw_provider == "mark_ii":
+                raise RuntimeError(
+                    "[DEVSECOPS BLOCK] MARK-II Cognitive Memory Architecture is currently under "
+                    "independent development and validation. Direct production activation is blocked "
+                    "until Phase 4 independent validation passes."
+                )
+
+            if raw_provider == "mark_i":
+                logger.info("Initializing Temporary MARK-I Memory Provider for Brain B")
+                candidate = TemporaryMarkIMemoryProvider()
+                if _is_production_environment():
+                    candidate.validate_startup()
+                _memory_subsystem_instance = candidate
             else:
-                logger.info("VENNELA_MEMORY_PROVIDER unset; defaulting deterministically to 'stateless'")
-                raw_provider = "stateless"
+                _memory_subsystem_instance = StatelessMemoryProvider()
 
-        if raw_provider not in ALLOWED_MEMORY_PROVIDERS:
-            raise ValueError(
-                f"[SEC-MEM-INVALID-PROVIDER] Unknown memory provider '{raw_provider}'. "
-                f"Strict allowlist: {sorted(list(ALLOWED_MEMORY_PROVIDERS))}."
-            )
-
-        if raw_provider == "mark_ii":
-            raise RuntimeError(
-                "[DEVSECOPS BLOCK] MARK-II Cognitive Memory Architecture is currently under "
-                "independent development and validation. Direct production activation is blocked "
-                "until Phase 4 independent validation passes."
-            )
-
-        if raw_provider == "mark_i":
-            logger.info("Initializing Temporary MARK-I Memory Provider for Brain B")
-            _memory_subsystem_instance = TemporaryMarkIMemoryProvider()
-        else:
-            _memory_subsystem_instance = StatelessMemoryProvider()
-
-    return _memory_subsystem_instance
+        return _memory_subsystem_instance
 
 
 def reset_memory_subsystem() -> None:
     """Reset singleton for dynamic configuration changes and testing."""
     global _memory_subsystem_instance
-    _memory_subsystem_instance = None
+    with _memory_subsystem_lock:
+        _memory_subsystem_instance = None
 
 
 __all__ = [

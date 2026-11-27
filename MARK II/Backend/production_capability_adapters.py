@@ -181,31 +181,46 @@ class ProductionWebAgent:
         return payload
 
     def _run_web_agent(self, request: str, request_id: str | None = None) -> Any:
+        def invoke_async() -> Any:
+            if request_id:
+                parameters = inspect.signature(self.web_hunt_agent.run).parameters
+                if "context" in parameters or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                ):
+                    return asyncio.run(
+                        self.web_hunt_agent.run(
+                            request,
+                            context={"request_id": request_id},
+                        )
+                    )
+            return asyncio.run(self.web_hunt_agent.run(request))
+
+        try:
+            asyncio.get_running_loop()
+            in_running_loop = True
+        except RuntimeError:
+            in_running_loop = False
+
+        if not in_running_loop:
+            try:
+                result = invoke_async()
+            except Exception as exc:
+                raise RuntimeError("Production WebHuntAgent execution failed") from exc
+            if result is None:
+                raise RuntimeError("Production WebHuntAgent returned no result")
+            return result
+
         outcome: list[Any] = []
         failures: list[Exception] = []
 
         def run() -> None:
             try:
-                if request_id:
-                    parameters = inspect.signature(self.web_hunt_agent.run).parameters
-                    if "context" in parameters or any(
-                        parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        for parameter in parameters.values()
-                    ):
-                        outcome.append(asyncio.run(
-                            self.web_hunt_agent.run(
-                                request,
-                                context={"request_id": request_id},
-                            )
-                        ))
-                    else:
-                        outcome.append(asyncio.run(self.web_hunt_agent.run(request)))
-                else:
-                    outcome.append(asyncio.run(self.web_hunt_agent.run(request)))
+                outcome.append(invoke_async())
             except Exception as exc:
                 failures.append(exc)
 
-        worker = threading.Thread(target=run, name="langgraph-web-adapter")
+        worker = threading.Thread(target=run, name="langgraph-web-adapter", daemon=True)
         worker.start()
         worker.join()
         if failures:
