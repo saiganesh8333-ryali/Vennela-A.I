@@ -20,6 +20,7 @@ from enum import Enum
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -149,6 +150,15 @@ class StatelessMemoryProvider(MemorySubsystemInterface):
     5. Fails closed if user_id is missing or empty.
     """
 
+    def __init__(self, *, reason: str = "provider_disabled", detail: Optional[str] = None):
+        self._reason = reason
+        self._detail = detail
+
+    @property
+    def reason(self) -> str:
+        """Return the non-secret reason stateless mode is active."""
+        return self._reason
+
     def retrieve(self, request: MemoryRetrievalRequest) -> MemoryRetrievalResponse:
         if not request.user_id or not request.user_id.strip():
             raise ValueError(
@@ -159,7 +169,7 @@ class StatelessMemoryProvider(MemorySubsystemInterface):
             memory_count=0,
             mode=MemoryIsolationMode.STATELESS_ISOLATED,
             duration_ms=0.0,
-            metadata={"status": "memory_disabled_stateless_mode"},
+            metadata={"status": "memory_disabled_stateless_mode", "reason": self._reason},
         )
 
     def store(
@@ -180,12 +190,22 @@ class StatelessMemoryProvider(MemorySubsystemInterface):
     def mode(self) -> MemoryIsolationMode:
         return MemoryIsolationMode.STATELESS_ISOLATED
 
+    def validate_startup(self) -> None:
+        """Emit a non-secret startup diagnostic explaining stateless mode."""
+        logger.warning(
+            "Memory subsystem startup state: mode=%s memory_status=disabled memory_enabled=false reason=%s%s",
+            self.mode.value,
+            self._reason,
+            f" detail={self._detail}" if self._detail else "",
+        )
+
     def check_readiness(self) -> Tuple[bool, Dict[str, Any]]:
         """Report intentional stateless isolation without claiming live DB failure."""
         return True, {
             "memory_status": "disabled",
             "memory_mode": self.mode.value,
             "memory_enabled": False,
+            "reason": self._reason,
         }
 
 
@@ -208,6 +228,76 @@ def _require_user_id(user_id: Optional[str], operation: str) -> str:
     return clean
 
 
+def resolve_supabase_credentials() -> Tuple[str, str, Optional[str]]:
+    """Resolve SUPABASE_URL and SUPABASE_KEY (with SUPABASE_SERVICE_ROLE_KEY fallback).
+
+    Returns (url, key, missing_reason) where missing_reason is None when both are present,
+    or a non-secret token such as 'missing_env:SUPABASE_KEY'.
+    """
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = os.getenv("SUPABASE_KEY", "").strip()
+    if not key:
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+    missing: list[str] = []
+    if not url:
+        missing.append("SUPABASE_URL")
+    if not key:
+        missing.append("SUPABASE_KEY")
+    missing_reason = f"missing_env:{','.join(missing)}" if missing else None
+    return url, key, missing_reason
+
+
+_SAFE_STATUS_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,24}$")
+_SAFE_DIAGNOSTIC_TOKEN_RE = re.compile(r"(missing_(?:env:[A-Za-z0-9_,]+|package:[A-Za-z0-9_.-]+))")
+_SAFE_EMBEDDED_CODE_RE = re.compile(r"['\"]code['\"]\s*:\s*['\"]([A-Za-z0-9_-]{1,24})['\"]")
+
+
+def _extract_safe_status_code(exc: BaseException) -> Optional[str]:
+    """Extract a non-secret HTTP status or short error code from an exception chain."""
+    seen: set[int] = set()
+    curr: Optional[BaseException] = exc
+    while curr is not None and id(curr) not in seen:
+        seen.add(id(curr))
+        resp = getattr(curr, "response", None)
+        for candidate in (
+            getattr(resp, "status_code", None) if resp is not None else None,
+            getattr(curr, "status_code", None),
+            getattr(curr, "status", None),
+            getattr(curr, "code", None),
+        ):
+            if isinstance(candidate, int) and 100 <= candidate <= 599:
+                return str(candidate)
+            if isinstance(candidate, str):
+                cleaned = candidate.strip()
+                if _SAFE_STATUS_CODE_RE.match(cleaned):
+                    return cleaned
+        embedded = _SAFE_EMBEDDED_CODE_RE.search(str(curr))
+        if embedded:
+            return embedded.group(1)
+        curr = getattr(curr, "__cause__", None) or getattr(curr, "__context__", None)
+    return None
+
+
+def classify_memory_error(exc: BaseException) -> str:
+    """Map a memory initialization or probe failure to a non-secret diagnostic reason."""
+    msg = str(exc)
+    token_match = _SAFE_DIAGNOSTIC_TOKEN_RE.search(msg)
+    if token_match:
+        return token_match.group(1)
+
+    if "SUPABASE_URL and SUPABASE_KEY" in msg or "P0-02 FATAL" in msg:
+        _, _, missing_reason = resolve_supabase_credentials()
+        if missing_reason:
+            return missing_reason
+
+    status_code = _extract_safe_status_code(exc)
+    err_type = type(exc).__name__
+    if status_code:
+        return f"supabase_probe_failed:{status_code}/{err_type}"
+    return f"supabase_probe_failed:{err_type}"
+
+
 def _is_production_environment() -> bool:
     """Return True when executing in a deployed production/staging/Render environment."""
     env = os.getenv("ENVIRONMENT", "").strip().lower()
@@ -218,7 +308,13 @@ def _is_production_environment() -> bool:
 
 
 def _warn_if_anon_supabase_key(key: str) -> None:
-    """Safely warn when SUPABASE_KEY looks like an anon JWT without ever logging any secret."""
+    """Safely warn when SUPABASE_KEY looks like an anon/publishable key without ever logging any secret."""
+    if key.startswith("sb_publishable_"):
+        logger.warning(
+            "SUPABASE_KEY appears to be a publishable key; public.memories has RLS enabled with 0 policies "
+            "and requires the server-side service_role/secret key."
+        )
+        return
     parts = key.split(".")
     if len(parts) != 3:
         return
@@ -310,10 +406,13 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
         from memory.api import MemoryAPI
         from memory.repository import InMemoryMemoryRepository, SupabaseMemoryRepository
 
-        url = os.getenv("SUPABASE_URL", "").strip()
-        key = os.getenv("SUPABASE_KEY", "").strip()
+        url, key, missing_reason = resolve_supabase_credentials()
         if url and key:
-            from supabase import ClientOptions, create_client
+            try:
+                from supabase import ClientOptions, create_client
+            except ImportError as exc:
+                pkg = (getattr(exc, "name", None) or "supabase").split(".")[0]
+                raise RuntimeError(f"missing_package:{pkg}") from exc
 
             _warn_if_anon_supabase_key(key)
             options = ClientOptions(
@@ -325,15 +424,17 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
 
         if _is_production_environment():
             msg = (
-                "[P0-02 FATAL] SUPABASE_URL and SUPABASE_KEY are required when "
-                "VENNELA_MEMORY_PROVIDER=mark_i in production/Render environments."
+                "[P0-02 FATAL] SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) "
+                "are required when VENNELA_MEMORY_PROVIDER=mark_i in production/Render environments "
+                f"({missing_reason})."
             )
             logger.critical(msg)
             raise RuntimeError(msg)
 
         logger.warning(
-            "SUPABASE_URL/SUPABASE_KEY not configured in non-production environment; "
-            "TemporaryMarkIMemoryProvider using InMemoryMemoryRepository"
+            "SUPABASE_URL/SUPABASE_KEY not configured in non-production environment (%s); "
+            "TemporaryMarkIMemoryProvider using InMemoryMemoryRepository",
+            missing_reason,
         )
         return MemoryAPI(InMemoryMemoryRepository())
 
@@ -353,8 +454,10 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                     "[P0-02 FATAL] Volatile InMemoryMemoryRepository is prohibited in production."
                 )
             if verify_owner_query and self._api_factory is None:
+                _, _, missing_reason = resolve_supabase_credentials()
                 raise RuntimeError(
-                    "SUPABASE_URL and SUPABASE_KEY are required to verify live MARK-I memory readiness."
+                    "SUPABASE_URL and SUPABASE_KEY are required to verify live MARK-I memory readiness "
+                    f"({missing_reason or 'missing_env:SUPABASE_URL,SUPABASE_KEY'})."
                 )
             return {"memory_enabled": True, "owner_scoped": False}
 
@@ -392,14 +495,20 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                 api = self._get_api()
                 self._probe_api(api)
                 self._mark_healthy()
+                logger.info(
+                    "MARK-I memory startup validation passed (mode=%s memory_status=healthy)",
+                    self.mode.value,
+                )
             except Exception as exc:
                 self._mark_degraded(exc)
+                diagnostic_reason = classify_memory_error(exc)
                 logger.critical(
-                    "MARK-I startup validation/connectivity probe failed (%s)",
+                    "MARK-I startup validation/connectivity probe failed reason=%s error_type=%s",
+                    diagnostic_reason,
                     type(exc).__name__,
                 )
                 raise RuntimeError(
-                    f"[P0-02 FATAL] MARK-I memory startup validation failed ({type(exc).__name__})."
+                    f"[P0-02 FATAL] MARK-I memory startup validation failed ({diagnostic_reason})."
                 ) from exc
 
     def check_readiness(self, owner_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
@@ -420,8 +529,10 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                 }
             except Exception as exc:
                 self._mark_degraded(exc)
+                diagnostic_reason = classify_memory_error(exc)
                 logger.warning(
-                    "MARK-I readiness probe failed (%s); reporting degraded status",
+                    "MARK-I readiness probe failed reason=%s error_type=%s; reporting degraded status",
+                    diagnostic_reason,
                     type(exc).__name__,
                 )
                 details: Dict[str, Any] = {
@@ -429,9 +540,16 @@ class TemporaryMarkIMemoryProvider(MemorySubsystemInterface):
                     "memory_mode": self.mode.value,
                     "memory_enabled": True,
                     "error_type": type(exc).__name__,
+                    "diagnostic_reason": diagnostic_reason,
                 }
-                if "SUPABASE_URL and SUPABASE_KEY are required" in str(exc) or "P0-02 FATAL" in str(exc):
+                if (
+                    diagnostic_reason.startswith("missing_env:")
+                    or "SUPABASE_URL and SUPABASE_KEY are required" in str(exc)
+                    or "P0-02 FATAL" in str(exc)
+                ):
                     details["reason"] = "missing_supabase_credentials"
+                else:
+                    details["reason"] = diagnostic_reason
                 return False, details
 
     def retrieve(self, request: MemoryRetrievalRequest) -> MemoryRetrievalResponse:
@@ -765,15 +883,26 @@ def get_memory_subsystem() -> MemorySubsystemInterface:
     global _memory_subsystem_instance
     with _memory_subsystem_lock:
         if _memory_subsystem_instance is None:
+            raw_provider_present = "VENNELA_MEMORY_PROVIDER" in os.environ
             raw_provider = os.getenv("VENNELA_MEMORY_PROVIDER", "").strip().lower()
-            memory_enabled = os.getenv("VENNELA_MEMORY_ENABLED", "false").strip().lower() == "true"
+            raw_enabled = os.getenv("VENNELA_MEMORY_ENABLED", "").strip().lower()
+            memory_enabled = raw_enabled == "true"
+            stateless_detail: Optional[str] = None
 
             if not raw_provider:
                 if memory_enabled:
                     logger.info("VENNELA_MEMORY_ENABLED=true with unset provider; activating 'mark_i'")
                     raw_provider = "mark_i"
                 else:
-                    logger.info("VENNELA_MEMORY_PROVIDER unset; defaulting deterministically to 'stateless'")
+                    stateless_detail = (
+                        f"VENNELA_MEMORY_PROVIDER={'<empty>' if raw_provider_present else '<unset>'},"
+                        f"VENNELA_MEMORY_ENABLED={raw_enabled or '<unset>'}"
+                    )
+                    logger.warning(
+                        "VENNELA_MEMORY_PROVIDER unset; defaulting deterministically to 'stateless' "
+                        "(reason=provider_disabled detail=%s)",
+                        stateless_detail,
+                    )
                     raw_provider = "stateless"
 
             if raw_provider not in ALLOWED_MEMORY_PROVIDERS:
@@ -796,7 +925,20 @@ def get_memory_subsystem() -> MemorySubsystemInterface:
                     candidate.validate_startup()
                 _memory_subsystem_instance = candidate
             else:
-                _memory_subsystem_instance = StatelessMemoryProvider()
+                if stateless_detail is None:
+                    stateless_detail = (
+                        "VENNELA_MEMORY_PROVIDER=stateless"
+                        + (",overrides_VENNELA_MEMORY_ENABLED=true" if memory_enabled else "")
+                    )
+                    logger.warning(
+                        "VENNELA_MEMORY_PROVIDER=stateless; activating STATELESS_ISOLATED "
+                        "(reason=provider_disabled detail=%s)",
+                        stateless_detail,
+                    )
+                _memory_subsystem_instance = StatelessMemoryProvider(
+                    reason="provider_disabled",
+                    detail=stateless_detail,
+                )
 
         return _memory_subsystem_instance
 
@@ -816,6 +958,8 @@ __all__ = [
     "MemorySubsystemInterface",
     "StatelessMemoryProvider",
     "TemporaryMarkIMemoryProvider",
+    "classify_memory_error",
     "get_memory_subsystem",
     "reset_memory_subsystem",
+    "resolve_supabase_credentials",
 ]

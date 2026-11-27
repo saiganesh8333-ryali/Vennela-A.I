@@ -9,8 +9,10 @@ from .memory_contracts import (
     MemorySubsystemInterface,
     StatelessMemoryProvider,
     TemporaryMarkIMemoryProvider,
+    classify_memory_error,
     get_memory_subsystem,
     reset_memory_subsystem,
+    resolve_supabase_credentials,
 )
 
 __all__ = [
@@ -24,6 +26,8 @@ __all__ = [
     "MemorySubsystemInterface",
     "StatelessMemoryProvider",
     "TemporaryMarkIMemoryProvider",
+    "classify_memory_error",
     "get_memory_subsystem",
     "reset_memory_subsystem",
+    "resolve_supabase_credentials",
 ]

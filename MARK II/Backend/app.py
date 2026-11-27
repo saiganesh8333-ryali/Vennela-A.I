@@ -41,7 +41,9 @@ from observability import log_event, log_failure
 from core.memory_contracts import (
     MemoryIsolationMode,
     MemoryRetrievalRequest,
+    classify_memory_error,
     get_memory_subsystem,
+    resolve_supabase_credentials,
 )
 
 try:
@@ -159,24 +161,37 @@ def get_temporal_context():
     return _temporal_context
 
 
+def _build_repo_with_supabase_fallback(
+    supabase_repo_factory: Any,
+    fallback_repo_factory: Any,
+    label: str,
+) -> Any:
+    """Initialize a Supabase repository when configured, safely falling back in-memory."""
+    url, key, _ = resolve_supabase_credentials()
+    if url and key:
+        try:
+            from supabase import create_client
+            return supabase_repo_factory(create_client(url, key))
+        except Exception as exc:
+            logger.warning(
+                "Supabase %s repo unavailable (%s), falling back to in-memory",
+                label,
+                type(exc).__name__,
+            )
+    return fallback_repo_factory()
+
+
 def get_task_manager():
     global _task_manager
     if _task_manager is None:
         from core.tasks import TaskManager
-        url = os.getenv("SUPABASE_URL", "").strip()
-        key = os.getenv("SUPABASE_KEY", "").strip()
-        if url and key:
-            try:
-                from supabase import create_client
-                from core.tasks.repository import SupabaseTaskRepository
-                repo = SupabaseTaskRepository(create_client(url, key))
-            except Exception as e:
-                logger.warning("Supabase task repo unavailable, falling back to in-memory: %s", e)
-                from core.tasks.repository import InMemoryTaskRepository
-                repo = InMemoryTaskRepository()
-        else:
-            from core.tasks.repository import InMemoryTaskRepository
-            repo = InMemoryTaskRepository()
+        from core.tasks.repository import InMemoryTaskRepository, SupabaseTaskRepository
+
+        repo = _build_repo_with_supabase_fallback(
+            SupabaseTaskRepository,
+            InMemoryTaskRepository,
+            "task",
+        )
         _task_manager = TaskManager(repository=repo, temporal_context=get_temporal_context())
     return _task_manager
 
@@ -185,20 +200,13 @@ def get_reminder_manager():
     global _reminder_manager
     if _reminder_manager is None:
         from core.reminders import ReminderManager
-        url = os.getenv("SUPABASE_URL", "").strip()
-        key = os.getenv("SUPABASE_KEY", "").strip()
-        if url and key:
-            try:
-                from supabase import create_client
-                from core.reminders.repository import SupabaseReminderRepository
-                repo = SupabaseReminderRepository(create_client(url, key))
-            except Exception as e:
-                logger.warning("Supabase reminder repo unavailable, falling back to in-memory: %s", e)
-                from core.reminders.repository import InMemoryReminderRepository
-                repo = InMemoryReminderRepository()
-        else:
-            from core.reminders.repository import InMemoryReminderRepository
-            repo = InMemoryReminderRepository()
+        from core.reminders.repository import InMemoryReminderRepository, SupabaseReminderRepository
+
+        repo = _build_repo_with_supabase_fallback(
+            SupabaseReminderRepository,
+            InMemoryReminderRepository,
+            "reminder",
+        )
         _reminder_manager = ReminderManager(repository=repo, temporal_context=get_temporal_context())
     return _reminder_manager
 
@@ -770,7 +778,12 @@ async def ready():
         else:
             is_ready, details = True, {"memory_status": "healthy"}
     except Exception as exc:
-        logger.warning("Readiness check failed (%s)", type(exc).__name__)
+        diag_reason = classify_memory_error(exc)
+        logger.warning(
+            "Readiness check failed reason=%s error_type=%s",
+            diag_reason,
+            type(exc).__name__,
+        )
         return JSONResponse(
             status_code=503,
             content={
@@ -778,11 +791,19 @@ async def ready():
                 "brain": "brain_b_langgraph",
                 "memory_mode": "error",
                 "memory_status": "degraded",
+                "reason": diag_reason,
             },
         )
 
     mem_status = details.get("memory_status", "healthy" if is_ready else "degraded")
     if not is_ready or mem_status == "degraded":
+        logger.warning(
+            "Readiness check degraded memory_mode=%s memory_status=%s reason=%s diagnostic_reason=%s",
+            mem_mode,
+            mem_status,
+            details.get("reason", "unknown"),
+            details.get("diagnostic_reason", details.get("reason", "unknown")),
+        )
         not_ready_payload: Dict[str, Any] = {
             "status": "not_ready",
             "brain": "brain_b_langgraph",
@@ -791,9 +812,28 @@ async def ready():
         }
         if details.get("reason"):
             not_ready_payload["reason"] = details["reason"]
+        if details.get("diagnostic_reason") and details.get("diagnostic_reason") != details.get("reason"):
+            not_ready_payload["diagnostic_reason"] = details["diagnostic_reason"]
         return JSONResponse(
             status_code=503,
             content=not_ready_payload,
+        )
+
+    if mem_mode == MemoryIsolationMode.STATELESS_ISOLATED.value:
+        logger.info(
+            "Readiness check evaluated memory_mode=%s memory_status=%s memory_enabled=%s reason=%s",
+            mem_mode,
+            mem_status,
+            details.get("memory_enabled", False),
+            details.get("reason", "provider_disabled"),
+        )
+    else:
+        logger.info(
+            "Readiness check evaluated memory_mode=%s memory_status=%s memory_enabled=%s owner_scoped=%s",
+            mem_mode,
+            mem_status,
+            details.get("memory_enabled", True),
+            details.get("owner_scoped", False),
         )
 
     ready_payload: Dict[str, Any] = {
@@ -802,7 +842,7 @@ async def ready():
         "memory_mode": mem_mode,
         "memory_status": mem_status,
     }
-    for safe_key in ("memory_enabled", "owner_scoped", "owner_records_present"):
+    for safe_key in ("memory_enabled", "owner_scoped", "owner_records_present", "reason"):
         if safe_key in details:
             ready_payload[safe_key] = details[safe_key]
     return ready_payload

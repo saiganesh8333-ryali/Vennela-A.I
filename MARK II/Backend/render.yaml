@@ -24,7 +24,9 @@ services:
         value: llama-3.3-70b-versatile
       - key: GEMINI_API_KEY
         sync: false
-      # Database & Storage
+      # Database & Storage (service_role key required; SUPABASE_SERVICE_ROLE_KEY fallback supported)
+      # Note: If deploying via Render Dashboard (not Blueprint sync), ensure these keys plus
+      # VENNELA_MEMORY_PROVIDER=mark_i and VENNELA_MEMORY_ENABLED=true are set in Dashboard Env Vars.
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY

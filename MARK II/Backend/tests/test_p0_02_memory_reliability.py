@@ -48,6 +48,7 @@ def clean_p0_02_env():
             "VENNELA_MEMORY_ENABLED",
             "SUPABASE_URL",
             "SUPABASE_KEY",
+            "SUPABASE_SERVICE_ROLE_KEY",
             "ENVIRONMENT",
             "RENDER",
         )
@@ -467,4 +468,141 @@ def test_09_readiness_endpoint_matrix(monkeypatch, caplog):
     assert body_disabled["memory_mode"] == "STATELESS_ISOLATED"
     assert body_disabled["memory_status"] == "disabled"
     assert body_disabled["memory_enabled"] is False
+    assert body_disabled["reason"] == "provider_disabled"
+    reset_memory_subsystem()
+
+
+def test_10_safe_diagnostic_logging_enabled_disabled_and_failure_modes(monkeypatch, caplog):
+    """Verify safe startup and /ready diagnostic logs across enabled, disabled, alias, and failure paths."""
+    secret_key = "canary-sr-key-DO-NOT-LOG-998877"
+    secret_alias = "canary-alias-key-DO-NOT-LOG-445566"
+    secret_agent = "canary-agent-token-DO-NOT-LOG-112233"
+    monkeypatch.setenv("VENNELA_AGENT_TOKEN", secret_agent)
+
+    test_client = TestClient(app_module.app)
+
+    # 1. Memory disabled via unset env vars -> startup & /ready log provider_disabled with zero secrets
+    reset_memory_subsystem()
+    monkeypatch.delenv("VENNELA_MEMORY_PROVIDER", raising=False)
+    monkeypatch.delenv("VENNELA_MEMORY_ENABLED", raising=False)
+    monkeypatch.setenv("SUPABASE_KEY", secret_key)
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        app_module.validate_memory_startup()
+        resp_unset = test_client.get("/ready")
+
+    assert resp_unset.status_code == 200
+    assert resp_unset.json()["memory_mode"] == "STATELESS_ISOLATED"
+    assert resp_unset.json()["memory_enabled"] is False
+    assert resp_unset.json()["reason"] == "provider_disabled"
+    disabled_logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "STATELESS_ISOLATED" in disabled_logs
+    assert "reason=provider_disabled" in disabled_logs
+    assert secret_key not in disabled_logs
+    assert secret_agent not in disabled_logs
+
+    # 2. Memory enabled with SUPABASE_SERVICE_ROLE_KEY fallback -> startup & /ready log healthy with zero secrets
+    reset_memory_subsystem()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("VENNELA_MEMORY_PROVIDER", "mark_i")
+    monkeypatch.setenv("VENNELA_MEMORY_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://ymsbhyslvkcyipnglvlf.supabase.co")
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", secret_alias)
+
+    captured_auth: dict[str, str] = {}
+    db_ok = ControllableSupabaseClient(fail_mode=None)
+
+    def fake_create_client(url: str, key: str, options=None):
+        captured_auth["url"] = url
+        captured_auth["key"] = key
+        return db_ok
+
+    caplog.clear()
+    with patch("supabase.create_client", side_effect=fake_create_client), caplog.at_level("INFO"):
+        app_module.validate_memory_startup()
+        resp_enabled = test_client.get("/ready")
+
+    assert captured_auth["key"] == secret_alias
+    assert resp_enabled.status_code == 200
+    assert resp_enabled.json()["memory_mode"] == "MARK_I_TEMPORARY"
+    assert resp_enabled.json()["memory_status"] == "healthy"
+    assert resp_enabled.json()["memory_enabled"] is True
+    enabled_logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "MARK-I memory startup validation passed" in enabled_logs
+    assert "memory_mode=MARK_I_TEMPORARY" in enabled_logs
+    assert "memory_status=healthy" in enabled_logs
+    assert secret_alias not in enabled_logs
+    assert secret_alias not in resp_enabled.text
+    assert secret_agent not in enabled_logs
+
+    # 3. Missing SUPABASE_KEY specifically -> diagnostic_reason=missing_env:SUPABASE_KEY
+    reset_memory_subsystem()
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://ymsbhyslvkcyipnglvlf.supabase.co")
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        resp_missing_key = test_client.get("/ready")
+    assert resp_missing_key.status_code == 503
+    assert resp_missing_key.json()["reason"] == "missing_supabase_credentials"
+    assert resp_missing_key.json()["diagnostic_reason"] == "missing_env:SUPABASE_KEY"
+    assert "reason=missing_env:SUPABASE_KEY" in "\n".join(r.getMessage() for r in caplog.records)
+
+    # 4. Missing supabase package -> missing_package:supabase without leaking secrets
+    reset_memory_subsystem()
+    monkeypatch.setenv("SUPABASE_KEY", secret_key)
+    real_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "supabase" or name.startswith("supabase."):
+            raise ImportError("No module named 'supabase'", name="supabase")
+        return real_import(name, *args, **kwargs)
+
+    caplog.clear()
+    with patch("builtins.__import__", side_effect=fake_import), caplog.at_level("WARNING"):
+        resp_missing_pkg = test_client.get("/ready")
+    assert resp_missing_pkg.status_code == 503
+    assert resp_missing_pkg.json()["reason"] == "missing_package:supabase"
+    pkg_logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=missing_package:supabase" in pkg_logs
+    assert secret_key not in pkg_logs
+    assert secret_key not in resp_missing_pkg.text
+
+    # 5. Supabase HTTP probe failure -> supabase_probe_failed:<status>/<ErrorType> without leaking secrets
+    reset_memory_subsystem()
+
+    class HttpAuthError(RuntimeError):
+        def __init__(self, msg: str, status_code: int):
+            super().__init__(msg)
+            self.status_code = status_code
+
+    class HttpErrorSupabaseClient:
+        def table(self, name: str):
+            class _Q:
+                def select(self, *a, **kw):
+                    return self
+
+                def limit(self, *a, **kw):
+                    return self
+
+                def execute(self):
+                    raise HttpAuthError(f"Invalid API key {secret_key}", status_code=401)
+
+            return _Q()
+
+    with patch("supabase.create_client", return_value=HttpErrorSupabaseClient()):
+        # Non-prod allows caching TemporaryMarkIMemoryProvider then probing on /ready
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            resp_http_err = test_client.get("/ready")
+
+    assert resp_http_err.status_code == 503
+    assert resp_http_err.json()["reason"] == "supabase_probe_failed:401/HttpAuthError"
+    err_logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=supabase_probe_failed:401/HttpAuthError" in err_logs
+    assert secret_key not in err_logs
+    assert secret_key not in resp_http_err.text
     reset_memory_subsystem()
